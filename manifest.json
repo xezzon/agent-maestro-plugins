@@ -1,0 +1,7 @@
+{
+  "id": "kimi-code",
+  "name": "Kimi Code",
+  "tool": "kimi-code",
+  "config_dir": "~/.kimi-code",
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_kimi_code.wasm"
+}

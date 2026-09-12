@@ -2,5 +2,11 @@
 name = "maestro-plugin-kimi-code"
 version = "0.1.0"
 edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
 
 [dependencies]
+maestro-plugin-sdk = { git = "https://github.com/xezzon/agent-maestro", tag = "v0.2.0" }
+toml_edit = "0.22"
