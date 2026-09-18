@@ -1,12 +1,12 @@
-[package]
-name = "maestro-plugin-kimi-code"
-version = "0.1.0"
+# 多插件工作区：plugins/ 下每个子目录是一个自包含的 Maestro 插件，
+# 由 plugins/* 通配纳管，新增插件无需改动本文件。
+[workspace]
+resolver = "3"
+members = ["plugins/*"]
+
+[workspace.package]
 edition = "2024"
-publish = false
 
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
+[workspace.dependencies]
+# 各插件锁定同一 SDK tag：SDK 与宿主按发布 tag 对齐，升级兼容组合时只改这一处。
 maestro-plugin-sdk = { git = "https://github.com/xezzon/agent-maestro", tag = "v0.2.0" }
-toml_edit = "0.22"

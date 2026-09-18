@@ -1,0 +1,6 @@
+# 锁定工具链版本：本地与 CI 使用同一工具链，并自动装上 wasm32-wasip2 target，
+# 免去手动 `rustup target add`。channel 对齐宿主 tag（agent-maestro v0.2.0）所用的工具链。
+[toolchain]
+channel = "1.98.1"
+profile = "default"
+targets = ["wasm32-wasip2"]
