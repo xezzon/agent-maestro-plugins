@@ -9,4 +9,4 @@ edition = "2024"
 
 [workspace.dependencies]
 # 各插件锁定同一 SDK tag：SDK 与宿主按发布 tag 对齐，升级兼容组合时只改这一处。
-maestro-plugin-sdk = { git = "https://github.com/xezzon/agent-maestro", tag = "v0.2.0" }
+maestro-plugin-sdk = { git = "https://github.com/xezzon/agent-maestro", tag = "v0.4.1" }

@@ -34,7 +34,7 @@ cd plugins/kimi-code
 cargo build --release --target wasm32-wasip2
 ```
 
-产物为 WASM 组件 `plugins/kimi-code/target/wasm32-wasip2/release/maestro_plugin_kimi_code.wasm`。SDK 依赖锁定 agent-maestro 的发布 tag（当前 `v0.2.0`），随 tag 固化与宿主的兼容组合。
+产物为 WASM 组件 `plugins/kimi-code/target/wasm32-wasip2/release/maestro_plugin_kimi_code.wasm`。SDK 依赖锁定 agent-maestro 的发布 tag（当前 `v0.4.1`），随 tag 固化与宿主的兼容组合。
 
 ## 本地调试
 

@@ -12,7 +12,7 @@
 //! `[models."<alias>".overrides]` 中覆盖。
 //!
 //! 依赖 [`maestro-plugin-sdk`]（`maestro:plugin` 合同的类型化绑定），实现其
-//! `Guest` trait。宿主把 manifest 声明的 config_dir（即 `~/.kimi-code`）预开放
+//! `Guest` trait。宿主把 manifest 声明的 config_dir（即 `$HOME/.kimi-code`）预开放
 //! 为 "/"，插件以相对路径读写。注意 Kimi Code 支持 `KIMI_CODE_HOME` 重定向数据
 //! 目录，而插件 config_dir 由 manifest 静态声明，重定向场景不在支持范围内。
 
