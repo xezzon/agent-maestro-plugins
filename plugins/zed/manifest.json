@@ -1,0 +1,5 @@
+{
+  "id": "zed",
+  "config_dir": "$HOME/.config/zed",
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_zed.wasm"
+}

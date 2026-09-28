@@ -7,6 +7,7 @@
 | 插件 | 工具 | 说明 |
 | --- | --- | --- |
 | [`kimi-code`](plugins/kimi-code/README.md) | Kimi Code | 把 Maestro 中录入的 Provider 投影进 `~/.kimi-code/config.toml` |
+| [`zed`](plugins/zed/README.md) | Zed | 把 Maestro 中录入的 Provider 投影进 `~/.config/zed/settings.json` |
 
 ## 仓库结构
 
