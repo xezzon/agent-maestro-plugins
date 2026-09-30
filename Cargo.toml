@@ -8,5 +8,7 @@ members = ["plugins/*"]
 edition = "2024"
 
 [workspace.dependencies]
-# 各插件锁定同一 SDK tag：SDK 与宿主按发布 tag 对齐，升级兼容组合时只改这一处。
-maestro-plugin-sdk = { git = "https://github.com/xezzon/agent-maestro", tag = "v0.4.1" }
+# 各插件锁定同一 SDK 版本：SDK 与宿主按发布 tag 对齐，升级兼容组合时只改这一处。
+# keychain 桥接（WIT 1.1.0）尚未进入 release tag，暂锁定承载它的 issue-81 分支；
+# 待宿主发布含该接口的 tag 后改回 tag（Cargo.lock 已把分支钉到具体 commit）。
+maestro-plugin-sdk = { git = "https://github.com/xezzon/agent-maestro", branch = "issue-81" }

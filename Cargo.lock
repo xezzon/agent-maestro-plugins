@@ -104,8 +104,8 @@ dependencies = [
 
 [[package]]
 name = "maestro-plugin-sdk"
-version = "1.0.0"
-source = "git+https://github.com/xezzon/agent-maestro?tag=v0.4.1#dc52412781eb8ef7bb396837a28711df9689ebfb"
+version = "1.1.0"
+source = "git+https://github.com/xezzon/agent-maestro?branch=issue-81#07c7325ab81aa9b0949c212ee04d57f63b0ea396"
 dependencies = [
  "wit-bindgen",
 ]

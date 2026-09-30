@@ -9,14 +9,26 @@
 //! 原样不动）。命名空间用 `-` 而不是 `:`：Zed 会用 provider id 推导取凭证用的
 //! 环境变量名（`convert_case` 的 UpperSnake），冒号会落进变量名而无法在 shell 中使用。
 //!
-//! # 凭证无法投影
+//! # 凭证投影（keychain 桥接）
 //!
-//! Zed 的 `openai_compatible` / `anthropic_compatible` 条目没有 api_key 字段，
-//! Maestro 中录入的 API Key 因此落不了盘：Zed 只从操作系统钥匙串（按 api_url 索引，
-//! 经 Zed 自己的模型/provider 设置界面写入）或环境变量 `<PROVIDER_ID>_API_KEY`
-//! （provider id 转 UPPER_SNAKE）取凭证。插件既不伪造 api_key 字段，也不把凭证塞进
-//! `custom_headers`——Zed 在取到凭证之前就会以 `NoApiKey` 直接失败。README 记录了
-//! 上面两种补救方式。
+//! Zed 的 `openai_compatible` / `anthropic_compatible` 条目没有 api_key 字段：它只从
+//! 操作系统钥匙串（按 API 端点 URL 精确匹配条目）或环境变量 `<PROVIDER_ID>_API_KEY`
+//! （provider id 转 UPPER_SNAKE）取凭证。插件不伪造 api_key 字段，而是把 API Key 经
+//! 宿主的 `keychain` import 投影：manifest 声明 `keychain_namespace`，`key` 用 Provider
+//! 的 `base_url`（与设置里的 `api_url` 同一字符串）。同 key 重复写入为覆盖；Provider
+//! 没有 api_key 时删除该条目。
+//!
+//! 注意宿主当前把声明值当作条目 `service`、把 `key` 当作 `account`（keyring-rs 的通用
+//! 直接映射，见 ADR 0013 的 2026-09-30 修订）。Zed 自己的条目不是这个形状：macOS 用
+//! Internet Password（URL 在 `kSecAttrServer`、account 是常量 `Bearer`），Windows 的
+//! target 是 `zed:url=<url>`，Linux 的属性是 `{url, username}`、label 为
+//! `zed-github-account`。因此通用映射写出的条目 Zed 读不到——凭证投影要等宿主侧 Zed
+//! 适配器落地才生效（见 README）；插件这半边届时无需改动。
+//!
+//! 凭证逐条容错：单条 write/delete 失败只跳过该条，不影响其余条目与配置文件投影，
+//! `write-providers` 的返回值仍只含配置文件；失败原因在宿主日志接口（issue #82）
+//! 落地前不外显。插件无状态，Maestro 里删除 Provider 后其钥匙串条目成为孤儿，
+//! 需在 Zed 里手动重置（见 README）。
 //!
 //! `max_tokens` 是 Zed 的必填字段（语义为上下文窗口大小）而 Maestro 的 Model 不携带
 //! 该信息，插件写入固定默认值 [`DEFAULT_MAX_TOKENS`]。
@@ -31,7 +43,7 @@ use std::path::Path;
 
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstObjectProp, CstRootNode};
-use maestro_plugin_sdk::{Guest, Model, Protocol, Provider, export};
+use maestro_plugin_sdk::{Guest, Model, Protocol, Provider, export, keychain};
 
 /// 插件写入的唯一文件（相对 config_dir）。
 const SETTINGS_FILE: &str = "settings.json";
@@ -56,8 +68,28 @@ struct ZedPlugin;
 
 impl Guest for ZedPlugin {
     fn write_providers(providers: Vec<Provider>) -> Result<Vec<String>, String> {
+        // 先投影配置文件：解析失败即整体放弃，此时不写凭证。
         write_settings(&providers)?;
+        project_credentials(&providers);
         Ok(vec![SETTINGS_FILE.to_owned()])
+    }
+}
+
+/// 把每个 Provider 的凭证投影进目标钥匙串条目：有 api_key 则写入，没有则删除。
+/// 条目按 API 端点 URL 匹配（Zed 的约定），故 key 用 `base_url`——与 settings.json
+/// 中写的 `api_url` 是同一字符串。
+///
+/// 逐条容错：单条失败只跳过该条，不影响其余条目与配置文件投影；错误暂不外显
+/// （依赖宿主日志接口，见 issue #82）。keychain 桥接要求 manifest 声明
+/// `keychain_namespace`，否则调用在此被拒——拒绝只损失凭证，配置文件投影照常完成。
+/// 注意宿主当前的通用映射写出的条目 Zed 读不到，凭证落地要等宿主侧 Zed 适配器
+/// （见模块文档）。
+fn project_credentials(providers: &[Provider]) {
+    for provider in providers {
+        let _ = match &provider.api_key {
+            Some(api_key) => keychain::write(&provider.base_url, api_key),
+            None => keychain::delete(&provider.base_url),
+        };
     }
 }
 
@@ -172,8 +204,8 @@ fn project_section(
 }
 
 /// Provider 条目：`{ api_url, available_models }`。
-/// API Key 无处可写（见模块文档）；`capabilities` 在 Zed 侧有默认值，Maestro 也不携带
-/// 该信息，故省略。
+/// API Key 不进配置文件，另经 keychain 桥接投影（见模块文档）；`capabilities` 在 Zed
+/// 侧有默认值，Maestro 也不携带该信息，故省略。
 fn provider_value(provider: &Provider) -> CstInputValue {
     CstInputValue::Object(vec![
         (
