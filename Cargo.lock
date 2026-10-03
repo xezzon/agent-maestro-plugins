@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "maestro-plugin-kimi-code"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "maestro-plugin-sdk",
  "toml_edit",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "maestro-plugin-opencode"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "jsonc-parser",
  "maestro-plugin-sdk",

@@ -1,6 +1,5 @@
 [package]
 name = "maestro-plugin-opencode"
-version = "0.1.0"
 edition.workspace = true
 publish = false
 
