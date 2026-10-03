@@ -49,4 +49,4 @@ cargo build --release --target wasm32-wasip2
 
 ## 发布
 
-每个插件独立发布。打该插件的 tag（多插件共用本仓库时按插件区分，如 `kimi-code-v0.1.0`）→ 构建产物挂 GitHub Release（资产名固定 `plugin.wasm` 与 `manifest.json`，后者由 `jq` 把插件 `manifest.json` 的 `entry` 改写为本 Release 的 wasm 资产 URL 生成）→ 用户以 `…/releases/download/<tag>/manifest.json` 安装。详细步骤见插件作者指南。
+每个插件独立发布，版本由发布 tag 锚定，`Cargo.toml` 不声明 `version`。打该插件的 tag（多插件共用本仓库时按插件区分，如 `kimi-code-v0.1.0`）→ 构建产物挂 GitHub Release（资产名固定 `plugin.wasm` 与 `manifest.json`，后者由 `jq` 把插件 `manifest.json` 的 `entry` 改写为本 Release 的 wasm 资产 URL 生成）→ 用户以 `…/releases/download/<tag>/manifest.json` 安装。详细步骤见插件作者指南。
