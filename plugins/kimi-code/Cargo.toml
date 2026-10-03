@@ -9,4 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 maestro-plugin-sdk = { workspace = true }
-toml_edit = "0.22"
+toml_edit = "0.25"
