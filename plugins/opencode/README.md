@@ -11,7 +11,7 @@
 | Maestro | OpenCode `opencode.json` |
 | --- | --- |
 | Provider slug `foo`，协议 `openai-completions` | provider id `maestro-foo`，`npm: "@ai-sdk/openai-compatible"` |
-| Provider slug `foo`，协议 `anthropic-messages` | provider id `maestro-foo-anthropic`，`npm: "@ai-sdk/anthropic"` |
+| Provider slug `foo`，协议 `anthropic-messages` | provider id `maestro-foo`，`npm: "@ai-sdk/anthropic"` |
 | Base URL | `options.baseURL` |
 | API Key | `options.apiKey`（无凭证时省略） |
 | Model ID | `models` 的键 |
@@ -21,10 +21,12 @@
 
 ### 命名规则
 
-OpenCode 的自定义 provider 挂在一个 AI SDK npm 包上，一种协议一个 provider；Maestro Provider 同时配置两种协议端点时，宿主按单协议分别下发，插件写成两个条目：
+provider id 一律为 `maestro-<slug>`，协议只决定挂载的 AI SDK npm 包：
 
-- `openai-completions` → `maestro-<slug>`（挂 `@ai-sdk/openai-compatible`，`/v1/chat/completions`）
-- `anthropic-messages` → `maestro-<slug>-anthropic`（挂 `@ai-sdk/anthropic`）
+- `openai-completions` → 挂 `@ai-sdk/openai-compatible`（`/v1/chat/completions`）
+- `anthropic-messages` → 挂 `@ai-sdk/anthropic`
+
+slug 在 Maestro 中全局唯一且宿主按单协议下发（每个 slug 至多一次），因此 `slug → provider id` 的映射天然单射。OpenCode 一个 provider 只能挂一个 npm 包，若同一 Maestro Provider 同时配置两种协议端点，当前宿主会跳过该 Provider 并报告原因；未来宿主若按协议拆分下发，投影会检测到生成的 id 重复并报错放弃写入，不会静默覆盖。
 
 `maestro-` 前缀同时充当本插件条目的命名空间：OpenCode 的 provider id 与 models.dev 内置目录共享（`anthropic`、`openai` 等是内置 id），裸 slug 可能撞名。
 

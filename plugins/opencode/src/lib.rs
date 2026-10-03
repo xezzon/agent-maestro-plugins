@@ -18,6 +18,7 @@
 use std::fs;
 use std::path::Path;
 
+use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use maestro_plugin_sdk::{Guest, Protocol, Provider, export};
 
@@ -30,10 +31,6 @@ const SCHEMA_URL: &str = "https://opencode.ai/config.json";
 /// 旧条目，避免误伤用户手工配置的条目（OpenCode 的 provider id 与 models.dev
 /// 内置目录共享命名空间，`anthropic`、`openai` 等是内置 id）。
 const NAMESPACE: &str = "maestro-";
-/// anthropic-messages 协议条目的 id 后缀：OpenCode 一个 provider 只能挂一个
-/// AI SDK npm 包，Maestro Provider 同时配置两种协议端点时需拆为两条（宿主按
-/// 单协议下发），命名见 [`provider_id`]。
-const ANTHROPIC_SUFFIX: &str = "-anthropic";
 const KEY_PROVIDER: &str = "provider";
 const KEY_NPM: &str = "npm";
 const KEY_OPTIONS: &str = "options";
@@ -43,6 +40,20 @@ const KEY_MODELS: &str = "models";
 const KEY_NAME: &str = "name";
 const NPM_OPENAI_COMPATIBLE: &str = "@ai-sdk/openai-compatible";
 const NPM_ANTHROPIC: &str = "@ai-sdk/anthropic";
+/// 解析选项：只放行 OpenCode 官方支持的 JSONC 扩展（注释与尾逗号），其余宽松
+/// 语法（缺逗号、单引号、未加引号的键等）一律拒绝，避免写回 OpenCode 读不回的配置。
+const PARSE_OPTIONS: ParseOptions = ParseOptions {
+    allow_comments: true,
+    allow_trailing_commas: true,
+    allow_loose_object_property_names: false,
+    allow_missing_commas: false,
+    allow_single_quoted_strings: false,
+    allow_hexadecimal_numbers: false,
+    allow_unary_plus_numbers: false,
+    allow_bare_decimal_point_numbers: false,
+    allow_non_finite_numbers: false,
+    allow_extended_string_escapes: false,
+};
 
 struct OpenCodePlugin;
 
@@ -53,6 +64,9 @@ impl Guest for OpenCodePlugin {
     }
 }
 
+/// 读取（或新建）`opencode.json` 并写入投影结果。
+/// 落盘采用 tmp + rename 原子替换：先写临时文件成功后再 rename，
+/// I/O 错误不会留下半截的 opencode.json。
 fn write_config(providers: &[Provider]) -> Result<(), String> {
     let path = Path::new(CONFIG_FILE);
     let text = match fs::read_to_string(path) {
@@ -77,7 +91,7 @@ fn write_config(providers: &[Provider]) -> Result<(), String> {
 fn edit_config(text: &str, providers: &[Provider]) -> Result<String, String> {
     let root = match text.trim().is_empty() {
         true => new_document()?,
-        false => CstRootNode::parse(text, &Default::default()).map_err(|e| {
+        false => CstRootNode::parse(text, &PARSE_OPTIONS).map_err(|e| {
             format!("解析 {CONFIG_FILE} 失败，为避免破坏既有配置已放弃写入\n原因：{e}")
         })?,
     };
@@ -96,29 +110,36 @@ fn edit_config(text: &str, providers: &[Provider]) -> Result<String, String> {
     };
 
     remove_namespace_entries(&provider_obj);
+    let mut seen_ids = std::collections::HashSet::new();
     for provider in providers {
-        let id = provider_id(&provider.protocol, &provider.slug);
+        let id = provider_id(&provider.slug);
+        if !seen_ids.insert(id.clone()) {
+            return Err(format!(
+                "生成的 provider id `{id}` 重复：同一 slug 携带了多种协议端点，\
+                 而 OpenCode 一个 provider 只能挂一个 npm 包，\
+                 为避免条目互相覆盖已放弃写入"
+            ));
+        }
         provider_obj.append(&id, provider_entry(provider));
     }
 
     Ok(root.to_string())
 }
 
+/// 以带官方 schema 声明的空对象为种子，构造新配置文档。
 fn new_document() -> Result<CstRootNode, String> {
-    let root = CstRootNode::parse("{}", &Default::default())
+    let root = CstRootNode::parse("{}", &PARSE_OPTIONS)
         .map_err(|e| format!("初始化新 {CONFIG_FILE} 失败\n原因：{e}"))?;
     root.object_value_or_set()
         .append(SCHEMA_KEY, SCHEMA_URL.into());
     Ok(root)
 }
 
-/// OpenCode 的 provider id：openai-completions 为 `maestro-<slug>`，
-/// anthropic-messages 为 `maestro-<slug>-anthropic`。
-fn provider_id(protocol: &Protocol, slug: &str) -> String {
-    match protocol {
-        Protocol::OpenaiCompletions => format!("{NAMESPACE}{slug}"),
-        Protocol::AnthropicMessages => format!("{NAMESPACE}{slug}{ANTHROPIC_SUFFIX}"),
-    }
+/// OpenCode 的 provider id 一律为 `maestro-<slug>`：slug 在 Maestro 中唯一，
+/// 宿主按单协议下发（每个 slug 至多一次），映射天然单射；协议只影响挂载的
+/// npm 包（见 [`provider_npm`])。
+fn provider_id(slug: &str) -> String {
+    format!("{NAMESPACE}{slug}")
 }
 
 /// 删除表内所有 `maestro-` 前缀条目（上一轮投影的残留）。
@@ -141,6 +162,8 @@ fn provider_npm(protocol: &Protocol) -> &'static str {
     }
 }
 
+/// 单个 Provider 的 OpenCode 条目：`npm` 包、`options`（`baseURL` 与可选的
+/// `apiKey`）及 `models`（可选显示名）。
 fn provider_entry(provider: &Provider) -> CstInputValue {
     let mut options = vec![(
         KEY_BASE_URL.to_owned(),
@@ -187,6 +210,7 @@ mod tests {
         jsonc_parser::parse_to_serde_value::<serde_json::Value>(text, &Default::default()).unwrap()
     }
 
+    /// 构造测试用 Provider，逐字段给定投影输入的各项值。
     fn provider(
         slug: &str,
         protocol: Protocol,
@@ -209,6 +233,7 @@ mod tests {
         }
     }
 
+    /// 构造带固定 Base URL 与 API Key 的 openai-completions 测试 Provider。
     fn openai(slug: &str, models: &[(&str, Option<&str>)]) -> Provider {
         provider(
             slug,
@@ -289,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_protocol_gets_suffix_and_npm() {
+    fn anthropic_protocol_maps_npm_package() {
         let p = provider(
             "foo",
             Protocol::AnthropicMessages,
@@ -299,16 +324,13 @@ mod tests {
         );
         let out = edit_config("{}", &[p]).unwrap();
         let doc = parse_jsonc(&out);
+        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_ANTHROPIC);
         assert_eq!(
-            doc["provider"]["maestro-foo-anthropic"]["npm"],
-            NPM_ANTHROPIC
-        );
-        assert_eq!(
-            doc["provider"]["maestro-foo-anthropic"]["models"]["claude-5"]["name"],
+            doc["provider"]["maestro-foo"]["models"]["claude-5"]["name"],
             "Claude 5"
         );
         assert!(
-            doc["provider"]["maestro-foo-anthropic"]["options"]
+            doc["provider"]["maestro-foo"]["options"]
                 .get("apiKey")
                 .is_none()
         );
@@ -392,5 +414,43 @@ mod tests {
     fn rejects_non_object_provider() {
         let err = edit_config("{ \"provider\": 42 }", &[]).unwrap_err();
         assert!(err.contains("provider 已存在但不是对象"), "实际错误：{err}");
+    }
+
+    #[test]
+    fn accepts_comments_and_trailing_commas_only() {
+        // OpenCode 官方支持的 JSONC 扩展必须放行。
+        let input = "{ // comment\n  \"model\": \"a\",\n  \"provider\": {},\n}";
+        edit_config(input, &[]).unwrap();
+    }
+
+    #[test]
+    fn rejects_syntax_beyond_jsonc() {
+        // 缺逗号：jsonc-parser 默认允许，但 OpenCode 读不回，必须拒绝。
+        let err = edit_config("{ \"model\": \"a\" \"provider\": {} }", &[]).unwrap_err();
+        assert!(err.contains("解析 opencode.json 失败"), "实际错误：{err}");
+        // 单引号字符串同理。
+        let err = edit_config("{ 'model': 'a' }", &[]).unwrap_err();
+        assert!(err.contains("解析 opencode.json 失败"), "实际错误：{err}");
+    }
+
+    #[test]
+    fn detects_duplicate_provider_ids() {
+        // 同一 slug 携带两种协议端点会生成两个同名 id，必须显式报错而非静默覆盖。
+        // 当前宿主按单协议下发且 slug 唯一，正常输入不会触发，此为防御性检测。
+        let providers = [
+            openai("foo", &[("gpt-5", None)]),
+            provider(
+                "foo",
+                Protocol::AnthropicMessages,
+                "https://gw.example.com",
+                None,
+                &[],
+            ),
+        ];
+        let err = edit_config("{}", &providers).unwrap_err();
+        assert!(
+            err.contains("provider id `maestro-foo` 重复"),
+            "实际错误：{err}"
+        );
     }
 }
