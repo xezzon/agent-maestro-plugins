@@ -1,0 +1,91 @@
+name: Release plugin
+
+on:
+  workflow_dispatch:
+    # workflow_dispatch 不支持 branches 过滤，main 分支限制在 job 内校验
+    inputs:
+      plugin:
+        description: Plugin name (a directory under plugins/)
+        type: choice
+        required: true
+        options:
+          - kimi-code
+          - opencode
+      version:
+        description: Version (semver without v prefix, e.g. 0.1.0)
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+# 同一插件的发布互斥，不同插件的发布互不干扰
+concurrency:
+  group: release-${{ inputs.plugin }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release ${{ inputs.plugin }}
+    runs-on: ubuntu-latest
+    env:
+      PLUGIN: ${{ inputs.plugin }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          # 只允许从 main 分支手动触发
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::this workflow can only be dispatched from the main branch (got '$GITHUB_REF')"
+            exit 1
+          fi
+
+          TAG="$PLUGIN/v$VERSION"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version '$VERSION' is not valid semver (without v prefix), e.g. 0.1.0"
+            exit 1
+          fi
+          if [ ! -f "plugins/$PLUGIN/manifest.json" ]; then
+            echo "::error::plugins/$PLUGIN/manifest.json not found; the plugin name must match a directory under plugins/"
+            exit 1
+          fi
+          if [ -n "$(git ls-remote origin "refs/tags/$TAG")" ]; then
+            echo "::error::tag '$TAG' already exists; delete it or bump the version to re-release"
+            exit 1
+          fi
+
+      # runner 自带 rustup，进入仓库后按根 rust-toolchain.toml 自动切换工具链并补齐 wasm32-wasip2 target
+      # 必须在插件目录内构建：Cargo 只在从该目录调用时读取其 .cargo/config.toml
+      - name: Build
+        working-directory: plugins/${{ inputs.plugin }}
+        run: cargo build --release --target wasm32-wasip2
+
+      - name: Assemble assets
+        run: |
+          # 产物路径以插件 manifest.json 的 entry 为准，避免另推 crate 名造成两处维护
+          mkdir -p dist
+          cp "plugins/$PLUGIN/$(jq -r '.entry' "plugins/$PLUGIN/manifest.json")" dist/plugin.wasm
+          jq --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/plugin.wasm" \
+            '.entry = $url' "plugins/$PLUGIN/manifest.json" > dist/manifest.json
+
+      - name: Push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" \
+            --draft \
+            --verify-tag \
+            --title "$TAG" \
+            --generate-notes \
+            dist/plugin.wasm dist/manifest.json

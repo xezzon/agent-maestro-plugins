@@ -49,4 +49,4 @@ cargo build --release --target wasm32-wasip2
 
 ## 发布
 
-每个插件独立发布，版本由发布 tag 锚定，`Cargo.toml` 不声明 `version`。打该插件的 tag（多插件共用本仓库时按插件区分，如 `kimi-code-v0.1.0`）→ 构建产物挂 GitHub Release（资产名固定 `plugin.wasm` 与 `manifest.json`，后者由 `jq` 把插件 `manifest.json` 的 `entry` 改写为本 Release 的 wasm 资产 URL 生成）→ 用户以 `…/releases/download/<tag>/manifest.json` 安装。详细步骤见插件作者指南。
+每个插件独立发布，版本由发布 tag 锚定，`Cargo.toml` 不声明 `version`。发布通过 `.github/workflows/release.yml` 手动触发（仅 `main` 分支，不接受 push / tag 触发）：在 GitHub「Actions → Release plugin → Run workflow」选择插件（下拉项为 `plugins/` 下的目录名，新增插件时需同步更新该可选项）并填写版本号（semver，如 `0.1.0`），workflow 会构建该插件（`--release --target wasm32-wasip2`）、打 tag `<plugin-name>/v<semver>`（如 `kimi-code/v0.1.0`）、起草 Release（草稿状态，资产名固定 `plugin.wasm` 与 `manifest.json`，后者由 `jq` 把插件 `manifest.json` 的 `entry` 改写为本 Release 的 wasm 资产 URL 生成）；确认无误后在 Releases 页手动发布草稿，用户即可用 `…/releases/download/<plugin-name>/v<semver>/manifest.json` 安装。tag 已存在时 workflow 失败，重发需先删除旧 tag 或升版本号。详细约定见插件作者指南。
