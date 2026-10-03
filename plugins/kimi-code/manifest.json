@@ -1,5 +1,10 @@
 {
   "id": "kimi-code",
   "config_dir": "$HOME/.kimi-code",
-  "entry": "target/wasm32-wasip2/release/maestro_plugin_kimi_code.wasm"
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_kimi_code.wasm",
+  "upstream": {
+    "repository": "https://github.com/MoonshotAI/kimi-code",
+    "npm": "@moonshot-ai/kimi-code",
+    "version": "2.1.1"
+  }
 }

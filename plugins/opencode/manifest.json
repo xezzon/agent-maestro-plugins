@@ -1,5 +1,11 @@
 {
   "id": "opencode",
   "config_dir": "$HOME/.config/opencode",
-  "entry": "target/wasm32-wasip2/release/maestro_plugin_opencode.wasm"
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_opencode.wasm",
+  "upstream": {
+    "url": "https://opencode.ai/",
+    "repository": "https://github.com/anomalyco/opencode",
+    "npm": "@opencode/cli",
+    "version": "2.0.22"
+  }
 }
