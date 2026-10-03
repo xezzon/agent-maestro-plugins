@@ -41,7 +41,7 @@ cargo build --release --target wasm32-wasip2
 
 ## 本地调试
 
-按 [Maestro 插件作者指南](https://github.com/xezzon/agent-maestro/blob/main/docs/plugin-authoring.md)的 file 来源回路：
+按 [Maestro 插件作者指南](https://github.com/xezzon/agent-maestro/blob/main/crates/maestro-plugin-sdk/README.md)的 file 来源回路：
 
 1. 构建 wasm（插件 manifest 的 `entry` 已指向 cargo 产物路径）。
 2. 在 Maestro「添加插件」选「本地文件」，选择 `plugins/kimi-code/manifest.json`。
