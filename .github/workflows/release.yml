@@ -32,12 +32,12 @@ jobs:
       PLUGIN: ${{ inputs.plugin }}
       VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 缓存 rustup 工具链：key 随 rust-toolchain.toml 变化，restore-key 命中旧工具链时
       # rustup 会按 rust-toolchain.toml 自动补装新工具链与 wasm32-wasip2 target
       - name: Cache Rust toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.rustup
           key: rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
@@ -45,7 +45,7 @@ jobs:
 
       # 缓存 CARGO_HOME 下的 registry 与 git 依赖（SDK 为 git 依赖，checkout 在 ~/.cargo/git）
       - name: Cache Cargo home
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -55,7 +55,7 @@ jobs:
 
       # 缓存构建产物：.cargo/config.toml 把 target-dir 固定在插件目录内，按插件区分
       - name: Cache build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: plugins/${{ inputs.plugin }}/target
           key: target-${{ runner.os }}-${{ inputs.plugin }}-${{ hashFiles('Cargo.lock') }}
