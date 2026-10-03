@@ -34,6 +34,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Validate inputs
+        run: |
+          # 只允许从 main 分支手动触发
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::this workflow can only be dispatched from the main branch (got '$GITHUB_REF')"
+            exit 1
+          fi
+
+          TAG="$PLUGIN/v$VERSION"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version '$VERSION' is not valid semver (without v prefix), e.g. 0.1.0"
+            exit 1
+          fi
+          if [ ! -f "plugins/$PLUGIN/manifest.json" ]; then
+            echo "::error::plugins/$PLUGIN/manifest.json not found; the plugin name must match a directory under plugins/"
+            exit 1
+          fi
+          if [ -n "$(git ls-remote origin "refs/tags/$TAG")" ]; then
+            echo "::error::tag '$TAG' already exists; delete it or bump the version to re-release"
+            exit 1
+          fi
+
       # 缓存 rustup 工具链：key 随 rust-toolchain.toml 变化，restore-key 命中旧工具链时
       # rustup 会按 rust-toolchain.toml 自动补装新工具链与 wasm32-wasip2 target
       - name: Cache Rust toolchain
@@ -60,30 +84,6 @@ jobs:
           path: plugins/${{ inputs.plugin }}/target
           key: target-${{ runner.os }}-${{ inputs.plugin }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: target-${{ runner.os }}-${{ inputs.plugin }}-
-
-      - name: Validate inputs
-        run: |
-          # 只允许从 main 分支手动触发
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "::error::this workflow can only be dispatched from the main branch (got '$GITHUB_REF')"
-            exit 1
-          fi
-
-          TAG="$PLUGIN/v$VERSION"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::version '$VERSION' is not valid semver (without v prefix), e.g. 0.1.0"
-            exit 1
-          fi
-          if [ ! -f "plugins/$PLUGIN/manifest.json" ]; then
-            echo "::error::plugins/$PLUGIN/manifest.json not found; the plugin name must match a directory under plugins/"
-            exit 1
-          fi
-          if [ -n "$(git ls-remote origin "refs/tags/$TAG")" ]; then
-            echo "::error::tag '$TAG' already exists; delete it or bump the version to re-release"
-            exit 1
-          fi
 
       # runner 自带 rustup，进入仓库后按根 rust-toolchain.toml 自动切换工具链并补齐 wasm32-wasip2 target
       # 必须在插件目录内构建：Cargo 只在从该目录调用时读取其 .cargo/config.toml
