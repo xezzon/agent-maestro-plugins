@@ -1,0 +1,5 @@
+{
+  "id": "opencode",
+  "config_dir": "$HOME/.config/opencode",
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_opencode.wasm"
+}
