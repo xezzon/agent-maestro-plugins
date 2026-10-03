@@ -114,5 +114,4 @@ jobs:
             --draft \
             --verify-tag \
             --title "$TAG" \
-            --generate-notes \
             dist/plugin.wasm dist/manifest.json
