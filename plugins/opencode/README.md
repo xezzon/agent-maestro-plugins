@@ -6,13 +6,13 @@
 
 ## 投影规则
 
-每个单协议 Provider 写入一条 `provider["maestro-<slug>"]`：
+每个 Provider 写入一条 `provider["maestro-<slug>"]`：
 
 | Maestro | OpenCode `opencode.json` |
 | --- | --- |
-| Provider slug `foo`，协议 `openai-completions` | provider id `maestro-foo`，`npm: "@ai-sdk/openai-compatible"` |
-| Provider slug `foo`，协议 `anthropic-messages` | provider id `maestro-foo`，`npm: "@ai-sdk/anthropic"` |
-| Base URL | `options.baseURL` |
+| Provider slug `foo`，所选端点协议 `openai-completions` | provider id `maestro-foo`，`npm: "@ai-sdk/openai-compatible"` |
+| Provider slug `foo`，所选端点协议 `anthropic-messages` | provider id `maestro-foo`，`npm: "@ai-sdk/anthropic"` |
+| 所选端点 Base URL | `options.baseURL` |
 | API Key | `options.apiKey`（无凭证时省略） |
 | Model ID | `models` 的键 |
 | Model 显示名 | `models.<id>.name`（空则省略） |
@@ -26,7 +26,7 @@ provider id 一律为 `maestro-<slug>`，协议只决定挂载的 AI SDK npm 包
 - `openai-completions` → 挂 `@ai-sdk/openai-compatible`（`/v1/chat/completions`）
 - `anthropic-messages` → 挂 `@ai-sdk/anthropic`
 
-slug 在 Maestro 中全局唯一且宿主按单协议下发（每个 slug 至多一次），因此 `slug → provider id` 的映射天然单射。OpenCode 一个 provider 只能挂一个 npm 包，若同一 Maestro Provider 同时配置两种协议端点，当前宿主会跳过该 Provider 并报告原因；未来宿主若按协议拆分下发，投影会检测到生成的 id 重复并报错放弃写入，不会静默覆盖。
+OpenCode 一个 provider 只能挂一个 npm 包，而 Maestro 的 Provider 可同时携带两种协议端点，因此插件按 [ADR 0016](https://github.com/xezzon/agent-maestro/blob/main/docs/adr/0016-plugin-side-endpoint-selection.md) 为每个 Provider 选定唯一端点：优先界面所选协议对应的端点；所选协议缺失时，若该 Provider 只有唯一端点则用它，否则多端点优先 `openai-completions`。slug 在 Maestro 中全局唯一，每个 Provider 只投影一个 provider id，`npm` 只挂所选端点协议对应的包。
 
 `maestro-` 前缀同时充当本插件条目的命名空间：OpenCode 的 provider id 与 models.dev 内置目录共享（`anthropic`、`openai` 等是内置 id），裸 slug 可能撞名。
 

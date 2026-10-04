@@ -11,6 +11,10 @@
 //! 插件写入固定默认值 [`DEFAULT_MAX_CONTEXT_SIZE`]；如与实际不符，用户可在
 //! `[models."<alias>".overrides]` 中覆盖。
 //!
+//! Provider 可同时携带两种协议的端点与界面记录的投影选择；投影使用哪个端点由
+//! 插件按 ADR 0016 的规则裁定：选择有效→用它，否则唯一端点，多端点且无有效选择
+//! →优先 openai-completions。
+//!
 //! 依赖 [`maestro-plugin-sdk`]（`maestro:plugin` 合同的类型化绑定），实现其
 //! `Guest` trait。宿主把 manifest 声明的 config_dir（即 `$HOME/.kimi-code`）预开放
 //! 为 "/"，插件以相对路径读写。注意 Kimi Code 支持 `KIMI_CODE_HOME` 重定向数据
@@ -19,7 +23,7 @@
 use std::fs;
 use std::path::Path;
 
-use maestro_plugin_sdk::{Guest, Model, Protocol, Provider, export};
+use maestro_plugin_sdk::{Endpoint, Guest, Level, Model, Protocol, Provider, export, log};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 /// 插件写入的唯一文件（相对 config_dir）。
@@ -61,18 +65,34 @@ fn write_config(providers: &[Provider]) -> Result<(), String> {
         Err(e) => return Err(format!("读取 config.toml 失败\n原因：{e}")),
     };
 
+    // 端点选择在插件侧完成（ADR 0016）：先按规则为每个 Provider 选出投影端点。
+    // 宿主保证列表内 Provider 至少有一个端点，取不到属防御分支，记日志跳过。
+    let mut selected: Vec<(&Provider, &Endpoint)> = Vec::new();
+    for provider in providers {
+        match effective_endpoint(provider) {
+            Some(endpoint) => selected.push((provider, endpoint)),
+            None => log(
+                Level::Warning,
+                &format!(
+                    "Provider \"{}\" has no usable endpoint; skipping",
+                    provider.slug
+                ),
+            ),
+        }
+    }
+
     {
         let providers_table = ensure_table(&mut doc, TABLE_PROVIDERS)?;
         remove_namespace_entries(providers_table);
-        for provider in providers {
+        for (provider, endpoint) in &selected {
             let provider_name = format!("{NAMESPACE}{}", provider.slug);
-            providers_table.insert(&provider_name, provider_table(provider));
+            providers_table.insert(&provider_name, provider_table(provider, endpoint));
         }
     }
     {
         let models_table = ensure_table(&mut doc, TABLE_MODELS)?;
         remove_namespace_entries(models_table);
-        for provider in providers {
+        for (provider, _) in &selected {
             let provider_name = format!("{NAMESPACE}{}", provider.slug);
             for model in &provider.models {
                 let alias = format!("{provider_name}/{}", model.id);
@@ -123,10 +143,35 @@ fn provider_type(protocol: &Protocol) -> &'static str {
     }
 }
 
-fn provider_table(provider: &Provider) -> Item {
+/// 选择投影端点（ADR 0016）：
+/// 1. 界面所选协议确有端点 → 用它；
+/// 2. 否则只剩一个端点 → 用它（覆盖旧配置无选择、选择失效两类情形）；
+/// 3. 否则多端点且无有效选择 → 取固定顺序里的首选 openai-completions。
+fn effective_endpoint(provider: &Provider) -> Option<&Endpoint> {
+    if let Some(selected) = &provider.selected_protocol
+        && let Some(endpoint) = provider
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.protocol == selected)
+    {
+        return Some(endpoint);
+    }
+    if provider.endpoints.len() == 1 {
+        return provider.endpoints.first();
+    }
+    provider
+        .endpoints
+        .iter()
+        .find(|endpoint| matches!(endpoint.protocol, Protocol::OpenaiCompletions))
+        .or_else(|| provider.endpoints.first())
+}
+
+/// 单个 Provider 的 provider 条目：类型与 Base URL 取自 [`effective_endpoint`]
+/// 选出的端点，API Key 为 Provider 级。
+fn provider_table(provider: &Provider, endpoint: &Endpoint) -> Item {
     let mut entry = Table::new();
-    entry.insert(KEY_TYPE, value(provider_type(&provider.protocol)));
-    entry.insert(KEY_BASE_URL, value(provider.base_url.as_str()));
+    entry.insert(KEY_TYPE, value(provider_type(&endpoint.protocol)));
+    entry.insert(KEY_BASE_URL, value(endpoint.base_url.as_str()));
     // 无凭证时宿主传 None，本地网关模型在 Kimi Code 中仍可见；
     // 用户可自行补 api_key 或 env 兜底。
     if let Some(api_key) = &provider.api_key {

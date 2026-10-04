@@ -11,6 +11,9 @@
 //! provider id 与 models.dev 内置目录共享命名空间，故加 `maestro-` 前缀防撞名，
 //! 该前缀同时充当清理旧条目的匹配依据（对齐 kimi-code 的 `maestro:` 命名空间）。
 //!
+//! Provider 可同时携带两种协议的端点与界面记录的投影选择；投影使用哪个端点由
+//! 插件按 ADR 0016 的规则裁定，再据选中端点的协议挂对应的 AI SDK npm 包。
+//!
 //! 依赖 [`maestro-plugin-sdk`]（`maestro:plugin` 合同的类型化绑定），实现其
 //! `Guest` trait。宿主把 manifest 声明的 config_dir（即 `$HOME/.config/opencode`）
 //! 预开放为 "/"，插件以相对路径读写。
@@ -20,7 +23,7 @@ use std::path::Path;
 
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
-use maestro_plugin_sdk::{Guest, Protocol, Provider, export};
+use maestro_plugin_sdk::{Endpoint, Guest, Level, Protocol, Provider, export, log};
 
 /// 插件写入的唯一文件（相对 config_dir）。
 const CONFIG_FILE: &str = "opencode.json";
@@ -110,17 +113,23 @@ fn edit_config(text: &str, providers: &[Provider]) -> Result<String, String> {
     };
 
     remove_namespace_entries(&provider_obj);
-    let mut seen_ids = std::collections::HashSet::new();
     for provider in providers {
-        let id = provider_id(&provider.slug);
-        if !seen_ids.insert(id.clone()) {
-            return Err(format!(
-                "生成的 provider id `{id}` 重复：同一 slug 携带了多种协议端点，\
-                 而 OpenCode 一个 provider 只能挂一个 npm 包，\
-                 为避免条目互相覆盖已放弃写入"
-            ));
-        }
-        provider_obj.append(&id, provider_entry(provider));
+        // 端点选择在插件侧完成（ADR 0016）：宿主保证列表内 Provider 至少有一个
+        // 端点，取不到属防御分支，记日志跳过。
+        let Some(endpoint) = effective_endpoint(provider) else {
+            log(
+                Level::Warning,
+                &format!(
+                    "Provider \"{}\" has no usable endpoint; skipping",
+                    provider.slug
+                ),
+            );
+            continue;
+        };
+        provider_obj.append(
+            &provider_id(&provider.slug),
+            provider_entry(provider, endpoint),
+        );
     }
 
     Ok(root.to_string())
@@ -135,9 +144,9 @@ fn new_document() -> Result<CstRootNode, String> {
     Ok(root)
 }
 
-/// OpenCode 的 provider id 一律为 `maestro-<slug>`：slug 在 Maestro 中唯一，
-/// 宿主按单协议下发（每个 slug 至多一次），映射天然单射；协议只影响挂载的
-/// npm 包（见 [`provider_npm`])。
+/// OpenCode 的 provider id 一律为 `maestro-<slug>`：slug 在 Maestro 中唯一且宿主
+/// 每个 slug 只下发一条 Provider，映射天然单射；插件为每条 Provider 选出唯一端点
+/// （见 [`effective_endpoint`]），只挂该端点协议对应的 npm 包（见 [`provider_npm`]）。
 fn provider_id(slug: &str) -> String {
     format!("{NAMESPACE}{slug}")
 }
@@ -154,6 +163,29 @@ fn remove_namespace_entries(provider_obj: &CstObject) {
     }
 }
 
+/// 选择投影端点（ADR 0016）：
+/// 1. 界面所选协议确有端点 → 用它；
+/// 2. 否则只剩一个端点 → 用它（覆盖旧配置无选择、选择失效两类情形）；
+/// 3. 否则多端点且无有效选择 → 取固定顺序里的首选 openai-completions。
+fn effective_endpoint(provider: &Provider) -> Option<&Endpoint> {
+    if let Some(selected) = &provider.selected_protocol
+        && let Some(endpoint) = provider
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.protocol == selected)
+    {
+        return Some(endpoint);
+    }
+    if provider.endpoints.len() == 1 {
+        return provider.endpoints.first();
+    }
+    provider
+        .endpoints
+        .iter()
+        .find(|endpoint| matches!(endpoint.protocol, Protocol::OpenaiCompletions))
+        .or_else(|| provider.endpoints.first())
+}
+
 /// 协议透传为 OpenCode 挂载的 AI SDK npm 包。
 fn provider_npm(protocol: &Protocol) -> &'static str {
     match protocol {
@@ -163,11 +195,12 @@ fn provider_npm(protocol: &Protocol) -> &'static str {
 }
 
 /// 单个 Provider 的 OpenCode 条目：`npm` 包、`options`（`baseURL` 与可选的
-/// `apiKey`）及 `models`（可选显示名）。
-fn provider_entry(provider: &Provider) -> CstInputValue {
+/// `apiKey`）及 `models`（可选显示名）。`npm` 与 `baseURL` 取自
+/// [`effective_endpoint`] 选出的端点，`apiKey` 为 Provider 级。
+fn provider_entry(provider: &Provider, endpoint: &Endpoint) -> CstInputValue {
     let mut options = vec![(
         KEY_BASE_URL.to_owned(),
-        CstInputValue::from(provider.base_url.as_str()),
+        CstInputValue::from(endpoint.base_url.as_str()),
     )];
     // 无凭证时宿主传 None，本地网关模型在 OpenCode 中仍可见；
     // 用户可自行补 apiKey 或用 {env:VAR} / {file:path} 插值兜底。
@@ -191,7 +224,7 @@ fn provider_entry(provider: &Provider) -> CstInputValue {
     }
 
     CstInputValue::Object(vec![
-        (KEY_NPM.to_owned(), provider_npm(&provider.protocol).into()),
+        (KEY_NPM.to_owned(), provider_npm(&endpoint.protocol).into()),
         (KEY_OPTIONS.to_owned(), CstInputValue::Object(options)),
         (KEY_MODELS.to_owned(), CstInputValue::Object(models)),
     ])
@@ -202,7 +235,7 @@ export!(OpenCodePlugin);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maestro_plugin_sdk::Model;
+    use maestro_plugin_sdk::{Endpoint, Model};
 
     /// 投影结果带注释（JSONC），用 jsonc-parser 解析成 serde_json::Value 再断言，
     /// 同时兼作输出可被 JSONC 解析器读回的往返校验。
@@ -210,7 +243,7 @@ mod tests {
         jsonc_parser::parse_to_serde_value::<serde_json::Value>(text, &Default::default()).unwrap()
     }
 
-    /// 构造测试用 Provider，逐字段给定投影输入的各项值。
+    /// 构造单端点测试用 Provider，逐字段给定投影输入的各项值。
     fn provider(
         slug: &str,
         protocol: Protocol,
@@ -220,8 +253,11 @@ mod tests {
     ) -> Provider {
         Provider {
             slug: slug.to_owned(),
-            protocol,
-            base_url: base_url.to_owned(),
+            endpoints: vec![Endpoint {
+                protocol,
+                base_url: base_url.to_owned(),
+            }],
+            selected_protocol: None,
             api_key: api_key.map(str::to_owned),
             models: models
                 .iter()
@@ -230,6 +266,32 @@ mod tests {
                     display_name: name.map(str::to_owned),
                 })
                 .collect(),
+        }
+    }
+
+    /// 构造双端点测试用 Provider（openai 在前，与宿主收集顺序一致），
+    /// 并可指定界面记录的投影选择。
+    fn dual_endpoint(
+        slug: &str,
+        openai_url: &str,
+        anthropic_url: &str,
+        selected: Option<Protocol>,
+    ) -> Provider {
+        Provider {
+            slug: slug.to_owned(),
+            endpoints: vec![
+                Endpoint {
+                    protocol: Protocol::OpenaiCompletions,
+                    base_url: openai_url.to_owned(),
+                },
+                Endpoint {
+                    protocol: Protocol::AnthropicMessages,
+                    base_url: anthropic_url.to_owned(),
+                },
+            ],
+            selected_protocol: selected,
+            api_key: None,
+            models: Vec::new(),
         }
     }
 
@@ -434,23 +496,58 @@ mod tests {
     }
 
     #[test]
-    fn detects_duplicate_provider_ids() {
-        // 同一 slug 携带两种协议端点会生成两个同名 id，必须显式报错而非静默覆盖。
-        // 当前宿主按单协议下发且 slug 唯一，正常输入不会触发，此为防御性检测。
-        let providers = [
-            openai("foo", &[("gpt-5", None)]),
-            provider(
-                "foo",
-                Protocol::AnthropicMessages,
-                "https://gw.example.com",
-                None,
-                &[],
-            ),
-        ];
-        let err = edit_config("{}", &providers).unwrap_err();
-        assert!(
-            err.contains("provider id `maestro-foo` 重复"),
-            "实际错误：{err}"
+    fn selected_protocol_picks_its_endpoint() {
+        // 双端点且选择指向 anthropic：用它，而非固定首选 openai（ADR 0016）。
+        let p = dual_endpoint(
+            "foo",
+            "https://openai.example.com/v1",
+            "https://anthropic.example.com",
+            Some(Protocol::AnthropicMessages),
+        );
+        let out = edit_config("{}", &[p]).unwrap();
+        let doc = parse_jsonc(&out);
+        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_ANTHROPIC);
+        assert_eq!(
+            doc["provider"]["maestro-foo"]["options"]["baseURL"],
+            "https://anthropic.example.com"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_openai_when_selection_missing() {
+        // 双端点且无选择（旧配置）：取固定顺序里的首选 openai-completions。
+        let p = dual_endpoint(
+            "foo",
+            "https://openai.example.com/v1",
+            "https://anthropic.example.com",
+            None,
+        );
+        let out = edit_config("{}", &[p]).unwrap();
+        let doc = parse_jsonc(&out);
+        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_OPENAI_COMPATIBLE);
+        assert_eq!(
+            doc["provider"]["maestro-foo"]["options"]["baseURL"],
+            "https://openai.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn selection_pointing_to_absent_endpoint_falls_back_to_unique_endpoint() {
+        // 只配了 anthropic，选择却指向 openai：选择失效，用唯一端点。
+        let mut p = provider(
+            "foo",
+            Protocol::AnthropicMessages,
+            "https://anthropic.example.com",
+            None,
+            &[("claude-5", None)],
+        );
+        p.selected_protocol = Some(Protocol::OpenaiCompletions);
+        let out = edit_config("{}", &[p]).unwrap();
+        let doc = parse_jsonc(&out);
+        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_ANTHROPIC);
+        assert_eq!(
+            doc["provider"]["maestro-foo"]["options"]["baseURL"],
+            "https://anthropic.example.com"
         );
     }
 }
