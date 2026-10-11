@@ -14,8 +14,15 @@
 | Provider slug `foo`，所选端点协议 `anthropic-messages` | provider id `maestro-foo`，`npm: "@ai-sdk/anthropic"` |
 | 所选端点 Base URL | `options.baseURL` |
 | API Key | `options.apiKey`（无凭证时省略） |
+| Provider `custom_header` | `options.headers`（名→值对象，空则省略） |
 | Model ID | `models` 的键 |
 | Model 显示名 | `models.<id>.name`（空则省略） |
+| Model `limit.context_window` | `models.<id>.limit.context`（须与 `output` 同时有值，见下） |
+| Model `limit.max_input` | `models.<id>.limit.input`（可选，有值才写） |
+| Model `limit.max_output` | `models.<id>.limit.output`（须与 `context` 同时有值） |
+| Model `capabilities.tool_use` | `models.<id>.tool_call = true` |
+| Model `capabilities.image_in` | `models.<id>.attachment = true` 与 `models.<id>.modalities.input = ["text","image"]` |
+| Model `capabilities.thinking` | `models.<id>.reasoning = true` |
 
 新建 `opencode.json` 时会写入 `"$schema": "https://opencode.ai/config.json"`；已存在的文件不做改动。
 
@@ -39,6 +46,6 @@ Base URL 应填到协议根（如 `https://gateway.example.com` 或含 `/v1` 的
 - **只重建 `maestro-` 命名空间**。`opencode.json` 是 OpenCode 与用户共享的配置文件（`permission`、`mcp`、`agent` 等都在里面），本插件以 [`jsonc-parser`](https://crates.io/crates/jsonc-parser) 的 CST 无损编辑（JSONC 侧的 `toml_edit` 等价物）：先删除上一轮投影的 `maestro-` 条目再写入当前列表，注释、格式、尾逗号与其余条目原样保留。Maestro 中已删除的 Provider 不会残留，用户手写的条目不受影响。
 - **API Key 写明文 `options.apiKey`**。OpenCode 另有两类凭证承载方式：`{env:VAR}` / `{file:path}` 插值（可写入本插件的字段值），以及 `/connect` 写入的 `~/.local/share/opencode/auth.json`（不在配置目录内，插件够不到）。本期写明文，与 Maestro / kimi-code 的明文存储一致；介意明文可把 `options.apiKey` 手工改为插值形式，投影不会触碰非 `maestro-` 前缀条目。
 - **不写 `model` / `small_model`**。投影后用 `/models` 选择即可。
-- **模型上下文限额暂不投影**。`models.<id>.limit.context` / `limit.output` 需要 Model 的 `context_window` / `max_output` 字段（[agent-maestro#58](https://github.com/xezzon/agent-maestro/issues/58)），当前 `maestro:plugin` 合同尚未携带，待 SDK 暴露后补；provider 展示名（`name` 字段）同理。
+- **上限、能力与自定义 header 按声明投影**。`limit.context_window` / `limit.max_output` 写 `models.<id>.limit.context` / `limit.output`；OpenCode 的 `limit` 要求 `context` 与 `output` 同时存在（schema 二者皆必填），故只在两者都有正值时写整段，`limit.max_input` 有正值时补写可选的 `limit.input`。能力映射：`tool_use` → `tool_call = true`，`thinking` → `reasoning = true`，`image_in` → `modalities.input = ["text","image"]` 并同置 `attachment = true`（对齐 models.dev 的模型对象形状）。Provider 的 `custom_header` 写 `options.headers`。未设置项一律省略——不写 `false` / 空数组 / 空对象。
 - **不支持 Windows**。文档只写 `~/.config/opencode/opencode.json`（macOS 与 Linux 同路径），未给 Windows 分列路径，manifest 的 `config_dir` 声明为 `$HOME/.config/opencode`；待宿主支持按平台声明（[agent-maestro#80](https://github.com/xezzon/agent-maestro/issues/80)）后补。
 - 写入采用 tmp + rename 原子替换；文件解析失败时放弃写入并报错，不破坏既有配置。

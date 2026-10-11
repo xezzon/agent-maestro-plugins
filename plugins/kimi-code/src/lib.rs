@@ -7,8 +7,8 @@
 //! 其余内容经 `toml_edit` 无损保留（注释、格式、非插件条目原样不动）。
 //! 命名空间约定参照 Kimi Code 自带的 `managed:kimi-code` provider 命名。
 //!
-//! `max_context_size` 是 Kimi Code 的必填字段而 Maestro 的 Model 不携带该信息，
-//! 插件写入固定默认值 [`DEFAULT_MAX_CONTEXT_SIZE`]；如与实际不符，用户可在
+//! `max_context_size` 是 Kimi Code 的必填字段，取 Model 的 `limit.context_window`；
+//! 未设置时写固定默认值 [`DEFAULT_MAX_CONTEXT_SIZE`]；如与实际不符，用户可在
 //! `[models."<alias>".overrides]` 中覆盖。
 //!
 //! Provider 可同时携带两种协议的端点与界面记录的投影选择；投影使用哪个端点由
@@ -23,25 +23,31 @@
 use std::fs;
 use std::path::Path;
 
-use maestro_plugin_sdk::{Endpoint, Guest, Level, Model, Protocol, Provider, export, log};
-use toml_edit::{DocumentMut, Item, Table, value};
+use maestro_plugin_sdk::{
+    Endpoint, Guest, Level, Model, ModelCapability, Protocol, Provider, export, log,
+};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 /// 插件写入的唯一文件（相对 config_dir）。
 const CONFIG_FILE: &str = "config.toml";
 /// 插件条目的命名空间前缀：provider 名与模型别名都以此为前缀，
 /// 投影时据此识别并清理旧条目，避免误伤用户手工配置的条目。
 const NAMESPACE: &str = "maestro:";
-/// `max_context_size` 的固定默认值：Maestro 的 Model 不携带上下文长度信息，
-/// 而 Kimi Code 要求该字段必填。取保守值（128k），声明偏小只会让 Kimi Code
+/// `max_context_size` 的兜底默认值：Kimi Code 要求该字段必填，而 Model 的
+/// `limit.context_window` 可能缺省。取保守值（128k），声明偏小只会让 Kimi Code
 /// 提前压缩上下文，不会引发服务端报错；用户可用 model overrides 覆盖。
 const DEFAULT_MAX_CONTEXT_SIZE: i64 = 131072;
 
 const KEY_TYPE: &str = "type";
 const KEY_API_KEY: &str = "api_key";
 const KEY_BASE_URL: &str = "base_url";
+const KEY_CUSTOM_HEADERS: &str = "custom_headers";
 const KEY_PROVIDER: &str = "provider";
 const KEY_MODEL: &str = "model";
 const KEY_MAX_CONTEXT_SIZE: &str = "max_context_size";
+const KEY_MAX_INPUT_SIZE: &str = "max_input_size";
+const KEY_MAX_OUTPUT_SIZE: &str = "max_output_size";
+const KEY_CAPABILITIES: &str = "capabilities";
 const KEY_DISPLAY_NAME: &str = "display_name";
 const TABLE_PROVIDERS: &str = "providers";
 const TABLE_MODELS: &str = "models";
@@ -167,7 +173,7 @@ fn effective_endpoint(provider: &Provider) -> Option<&Endpoint> {
 }
 
 /// 单个 Provider 的 provider 条目：类型与 Base URL 取自 [`effective_endpoint`]
-/// 选出的端点，API Key 为 Provider 级。
+/// 选出的端点，API Key 与自定义 header 为 Provider 级。
 fn provider_table(provider: &Provider, endpoint: &Endpoint) -> Item {
     let mut entry = Table::new();
     entry.insert(KEY_TYPE, value(provider_type(&endpoint.protocol)));
@@ -177,14 +183,45 @@ fn provider_table(provider: &Provider, endpoint: &Endpoint) -> Item {
     if let Some(api_key) = &provider.api_key {
         entry.insert(KEY_API_KEY, value(api_key.as_str()));
     }
+    // 自定义 header：没有时省略整段，不写空表。宿主已按名排序，此处不再重排。
+    if !provider.custom_header.is_empty() {
+        let mut headers = Table::new();
+        for header in &provider.custom_header {
+            headers.insert(&header.name, value(header.value.as_str()));
+        }
+        entry.insert(KEY_CUSTOM_HEADERS, Item::Table(headers));
+    }
     Item::Table(entry)
 }
 
+/// 单个 Model 的 model 条目：token 上限与能力均有值才写，未设置一律省略。
+/// `max_context_size` 必填，缺省时回落到 [`DEFAULT_MAX_CONTEXT_SIZE`]。
 fn model_table(provider_name: &str, model: &Model) -> Item {
     let mut entry = Table::new();
     entry.insert(KEY_PROVIDER, value(provider_name));
     entry.insert(KEY_MODEL, value(model.id.as_str()));
-    entry.insert(KEY_MAX_CONTEXT_SIZE, value(DEFAULT_MAX_CONTEXT_SIZE));
+    entry.insert(
+        KEY_MAX_CONTEXT_SIZE,
+        value(
+            positive(model.limit.context_window)
+                .map(i64::from)
+                .unwrap_or(DEFAULT_MAX_CONTEXT_SIZE),
+        ),
+    );
+    if let Some(max_input) = positive(model.limit.max_input) {
+        entry.insert(KEY_MAX_INPUT_SIZE, value(i64::from(max_input)));
+    }
+    if let Some(max_output) = positive(model.limit.max_output) {
+        entry.insert(KEY_MAX_OUTPUT_SIZE, value(i64::from(max_output)));
+    }
+    let capabilities = capability_tags(&model.capabilities);
+    if !capabilities.is_empty() {
+        let mut array = Array::new();
+        for tag in capabilities {
+            array.push(tag);
+        }
+        entry.insert(KEY_CAPABILITIES, value(array));
+    }
     if let Some(name) = &model.display_name
         && !name.is_empty()
     {
@@ -193,4 +230,158 @@ fn model_table(provider_name: &str, model: &Model) -> Item {
     Item::Table(entry)
 }
 
+/// Kimi Code 的能力标签（`capabilities` 数组）。按合同声明序输出，未设置的能力不写。
+fn capability_tags(capabilities: &[ModelCapability]) -> Vec<&'static str> {
+    let mut tags = Vec::new();
+    if capabilities.contains(&ModelCapability::ToolUse) {
+        tags.push("tool_use");
+    }
+    if capabilities.contains(&ModelCapability::ImageIn) {
+        tags.push("image_in");
+    }
+    if capabilities.contains(&ModelCapability::Thinking) {
+        tags.push("thinking");
+    }
+    tags
+}
+
+/// 声明式上限只在为正时才投影：0 是唯一可能的非正取值（`u32` 承载，
+/// 负值在记录层即被类型拒绝），跳过且不记日志。
+fn positive(limit: Option<u32>) -> Option<u32> {
+    limit.filter(|limit| *limit > 0)
+}
+
 export!(KimiCodePlugin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maestro_plugin_sdk::{CustomHeader, ModelLimit};
+
+    const NO_LIMIT: ModelLimit = ModelLimit {
+        context_window: None,
+        max_input: None,
+        max_output: None,
+    };
+
+    fn endpoint() -> Endpoint {
+        Endpoint {
+            protocol: Protocol::OpenaiCompletions,
+            base_url: "https://gateway.example.com/v1".to_owned(),
+        }
+    }
+
+    fn provider_with_headers(headers: &[(&str, &str)]) -> Provider {
+        Provider {
+            slug: "foo".to_owned(),
+            endpoints: vec![endpoint()],
+            selected_protocol: None,
+            api_key: None,
+            custom_header: headers
+                .iter()
+                .map(|(name, value)| CustomHeader {
+                    name: (*name).to_owned(),
+                    value: (*value).to_owned(),
+                })
+                .collect(),
+            models: Vec::new(),
+        }
+    }
+
+    fn model_with(id: &str, limit: ModelLimit, capabilities: Vec<ModelCapability>) -> Model {
+        Model {
+            id: id.to_owned(),
+            display_name: None,
+            limit,
+            capabilities,
+        }
+    }
+
+    /// 把构造出的条目挂到键下渲染成 TOML，再解析回来断言（兼作语法往返校验）。
+    fn render(item: Item, key: &str) -> DocumentMut {
+        let mut doc = DocumentMut::new();
+        doc.insert(key, item);
+        doc.to_string()
+            .parse::<DocumentMut>()
+            .expect("渲染结果应是合法 TOML")
+    }
+
+    #[test]
+    fn projects_custom_headers() {
+        let provider = provider_with_headers(&[("X-A", "1"), ("Authorization", "Bearer t")]);
+        let doc = render(provider_table(&provider, &endpoint()), "p");
+        assert_eq!(doc["p"]["type"].as_str(), Some("openai"));
+        assert_eq!(doc["p"]["custom_headers"]["X-A"].as_str(), Some("1"));
+        assert_eq!(
+            doc["p"]["custom_headers"]["Authorization"].as_str(),
+            Some("Bearer t")
+        );
+    }
+
+    #[test]
+    fn omits_custom_headers_when_absent() {
+        let doc = render(
+            provider_table(&provider_with_headers(&[]), &endpoint()),
+            "p",
+        );
+        assert!(!doc.to_string().contains("custom_headers"));
+    }
+
+    #[test]
+    fn projects_model_limits() {
+        let model = model_with(
+            "gpt-5",
+            ModelLimit {
+                context_window: Some(200_000),
+                max_input: Some(100_000),
+                max_output: Some(8_192),
+            },
+            Vec::new(),
+        );
+        let doc = render(model_table("maestro:foo", &model), "m");
+        assert_eq!(doc["m"]["max_context_size"].as_integer(), Some(200_000));
+        assert_eq!(doc["m"]["max_input_size"].as_integer(), Some(100_000));
+        assert_eq!(doc["m"]["max_output_size"].as_integer(), Some(8_192));
+    }
+
+    #[test]
+    fn falls_back_to_default_context_size_and_omits_optional_limits() {
+        let model = model_with("m", NO_LIMIT, Vec::new());
+        let doc = render(model_table("maestro:foo", &model), "m");
+        assert_eq!(
+            doc["m"]["max_context_size"].as_integer(),
+            Some(DEFAULT_MAX_CONTEXT_SIZE)
+        );
+        let text = doc.to_string();
+        assert!(!text.contains("max_input_size"));
+        assert!(!text.contains("max_output_size"));
+    }
+
+    #[test]
+    fn projects_model_capabilities() {
+        let model = model_with(
+            "m",
+            NO_LIMIT,
+            vec![
+                ModelCapability::ToolUse,
+                ModelCapability::ImageIn,
+                ModelCapability::Thinking,
+            ],
+        );
+        let doc = render(model_table("maestro:foo", &model), "m");
+        let tags: Vec<&str> = doc["m"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect();
+        assert_eq!(tags, ["tool_use", "image_in", "thinking"]);
+    }
+
+    #[test]
+    fn omits_capabilities_when_unset() {
+        let model = model_with("m", NO_LIMIT, Vec::new());
+        let doc = render(model_table("maestro:foo", &model), "m");
+        assert!(!doc.to_string().contains("capabilities"));
+    }
+}

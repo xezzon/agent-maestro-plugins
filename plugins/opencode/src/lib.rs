@@ -23,7 +23,9 @@ use std::path::Path;
 
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
-use maestro_plugin_sdk::{Endpoint, Guest, Level, Protocol, Provider, export, log};
+use maestro_plugin_sdk::{
+    CustomHeader, Endpoint, Guest, Level, Model, ModelCapability, Protocol, Provider, export, log,
+};
 
 /// 插件写入的唯一文件（相对 config_dir）。
 const CONFIG_FILE: &str = "opencode.json";
@@ -41,6 +43,15 @@ const KEY_BASE_URL: &str = "baseURL";
 const KEY_API_KEY: &str = "apiKey";
 const KEY_MODELS: &str = "models";
 const KEY_NAME: &str = "name";
+const KEY_HEADERS: &str = "headers";
+const KEY_LIMIT: &str = "limit";
+const KEY_INPUT: &str = "input";
+const KEY_CONTEXT: &str = "context";
+const KEY_OUTPUT: &str = "output";
+const KEY_TOOL_CALL: &str = "tool_call";
+const KEY_ATTACHMENT: &str = "attachment";
+const KEY_MODALITIES: &str = "modalities";
+const KEY_REASONING: &str = "reasoning";
 const NPM_OPENAI_COMPATIBLE: &str = "@ai-sdk/openai-compatible";
 const NPM_ANTHROPIC: &str = "@ai-sdk/anthropic";
 /// 解析选项：只放行 OpenCode 官方支持的 JSONC 扩展（注释与尾逗号），其余宽松
@@ -195,8 +206,8 @@ fn provider_npm(protocol: &Protocol) -> &'static str {
 }
 
 /// 单个 Provider 的 OpenCode 条目：`npm` 包、`options`（`baseURL` 与可选的
-/// `apiKey`）及 `models`（可选显示名）。`npm` 与 `baseURL` 取自
-/// [`effective_endpoint`] 选出的端点，`apiKey` 为 Provider 级。
+/// `apiKey`、`headers`）及 `models`。`npm` 与 `baseURL` 取自
+/// [`effective_endpoint`] 选出的端点，`apiKey` 与 `headers` 为 Provider 级。
 fn provider_entry(provider: &Provider, endpoint: &Endpoint) -> CstInputValue {
     let mut options = vec![(
         KEY_BASE_URL.to_owned(),
@@ -210,18 +221,19 @@ fn provider_entry(provider: &Provider, endpoint: &Endpoint) -> CstInputValue {
             CstInputValue::from(api_key.as_str()),
         ));
     }
-
-    let mut models = Vec::new();
-    for model in &provider.models {
-        let mut entry = Vec::new();
-        // 合同未携带 Model 展示名时省略 name 字段。
-        if let Some(name) = &model.display_name
-            && !name.is_empty()
-        {
-            entry.push((KEY_NAME.to_owned(), CstInputValue::from(name.as_str())));
-        }
-        models.push((model.id.clone(), CstInputValue::Object(entry)));
+    // 没有自定义 header 时省略整段，不写空对象。
+    if !provider.custom_header.is_empty() {
+        options.push((
+            KEY_HEADERS.to_owned(),
+            headers_value(&provider.custom_header),
+        ));
     }
+
+    let models = provider
+        .models
+        .iter()
+        .map(|model| (model.id.clone(), model_entry(model)))
+        .collect();
 
     CstInputValue::Object(vec![
         (KEY_NPM.to_owned(), provider_npm(&endpoint.protocol).into()),
@@ -230,12 +242,76 @@ fn provider_entry(provider: &Provider, endpoint: &Endpoint) -> CstInputValue {
     ])
 }
 
+/// 自定义 header：`name` → `value` 对象。宿主已按名排序，此处不再重排。
+fn headers_value(headers: &[CustomHeader]) -> CstInputValue {
+    CstInputValue::Object(
+        headers
+            .iter()
+            .map(|header| {
+                (
+                    header.name.clone(),
+                    CstInputValue::from(header.value.as_str()),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// 单个 Model 的条目：显示名、token 上限与能力均有值才写，未设置一律省略。
+fn model_entry(model: &Model) -> CstInputValue {
+    let mut entry = Vec::new();
+    // 合同未携带 Model 展示名时省略 name 字段。
+    if let Some(name) = &model.display_name
+        && !name.is_empty()
+    {
+        entry.push((KEY_NAME.to_owned(), CstInputValue::from(name.as_str())));
+    }
+    if let Some(limit) = model_limit(model) {
+        entry.push((KEY_LIMIT.to_owned(), limit));
+    }
+    if model.capabilities.contains(&ModelCapability::ToolUse) {
+        entry.push((KEY_TOOL_CALL.to_owned(), true.into()));
+    }
+    // 能收图即两种模态都写：OpenCode 的 modalities.input 是完整列表，
+    // 没有「只收图不收字」的模型。attachment 与 models.dev 的模型对象一致同置。
+    if model.capabilities.contains(&ModelCapability::ImageIn) {
+        entry.push((KEY_ATTACHMENT.to_owned(), true.into()));
+        entry.push((
+            KEY_MODALITIES.to_owned(),
+            CstInputValue::Object(vec![(KEY_INPUT.to_owned(), vec!["text", "image"].into())]),
+        ));
+    }
+    if model.capabilities.contains(&ModelCapability::Thinking) {
+        entry.push((KEY_REASONING.to_owned(), true.into()));
+    }
+    CstInputValue::Object(entry)
+}
+
+/// Model 的 token 上限。OpenCode 的 `limit` 要求 `context` 与 `output` 同时存在
+/// （schema 二者皆必填），故只在两者都有正值时写出整段；`input` 可选，随其一并写。
+fn model_limit(model: &Model) -> Option<CstInputValue> {
+    let context = positive(model.limit.context_window)?;
+    let output = positive(model.limit.max_output)?;
+    let mut entries = vec![(KEY_CONTEXT.to_owned(), context.into())];
+    if let Some(input) = positive(model.limit.max_input) {
+        entries.push((KEY_INPUT.to_owned(), input.into()));
+    }
+    entries.push((KEY_OUTPUT.to_owned(), output.into()));
+    Some(CstInputValue::Object(entries))
+}
+
+/// 声明式上限只在为正时才投影：0 是唯一可能的非正取值（`u32` 承载，
+/// 负值在记录层即被类型拒绝），跳过且不记日志。
+fn positive(limit: Option<u32>) -> Option<u32> {
+    limit.filter(|limit| *limit > 0)
+}
+
 export!(OpenCodePlugin);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maestro_plugin_sdk::{Endpoint, Model};
+    use maestro_plugin_sdk::{CustomHeader, Endpoint, Model, ModelCapability, ModelLimit};
 
     /// 投影结果带注释（JSONC），用 jsonc-parser 解析成 serde_json::Value 再断言，
     /// 同时兼作输出可被 JSONC 解析器读回的往返校验。
@@ -259,11 +335,18 @@ mod tests {
             }],
             selected_protocol: None,
             api_key: api_key.map(str::to_owned),
+            custom_header: Vec::new(),
             models: models
                 .iter()
                 .map(|(id, name)| Model {
                     id: id.to_string(),
                     display_name: name.map(str::to_owned),
+                    limit: ModelLimit {
+                        context_window: None,
+                        max_input: None,
+                        max_output: None,
+                    },
+                    capabilities: Vec::new(),
                 })
                 .collect(),
         }
@@ -291,6 +374,7 @@ mod tests {
             ],
             selected_protocol: selected,
             api_key: None,
+            custom_header: Vec::new(),
             models: Vec::new(),
         }
     }
@@ -549,5 +633,178 @@ mod tests {
             doc["provider"]["maestro-foo"]["options"]["baseURL"],
             "https://anthropic.example.com"
         );
+    }
+
+    /// 构造带 Provider 级自定义 header、指定 Model 列表的 Provider。
+    fn rich_provider(headers: &[(&str, &str)], models: Vec<Model>) -> Provider {
+        Provider {
+            slug: "foo".to_owned(),
+            endpoints: vec![Endpoint {
+                protocol: Protocol::OpenaiCompletions,
+                base_url: "https://gateway.example.com/v1".to_owned(),
+            }],
+            selected_protocol: None,
+            api_key: None,
+            custom_header: headers
+                .iter()
+                .map(|(name, value)| CustomHeader {
+                    name: (*name).to_owned(),
+                    value: (*value).to_owned(),
+                })
+                .collect(),
+            models,
+        }
+    }
+
+    /// 构造携带 token 上限与能力的 Model。
+    fn rich_model(id: &str, limit: ModelLimit, capabilities: Vec<ModelCapability>) -> Model {
+        Model {
+            id: id.to_owned(),
+            display_name: None,
+            limit,
+            capabilities,
+        }
+    }
+
+    const NO_LIMIT: ModelLimit = ModelLimit {
+        context_window: None,
+        max_input: None,
+        max_output: None,
+    };
+
+    #[test]
+    fn projects_custom_headers_into_provider_options() {
+        let p = rich_provider(&[("X-A", "1"), ("X-B", "2")], Vec::new());
+        let out = edit_config("{}", &[p]).unwrap();
+        let doc = parse_jsonc(&out);
+        let headers = &doc["provider"]["maestro-foo"]["options"]["headers"];
+        assert_eq!(headers["X-A"], "1");
+        assert_eq!(headers["X-B"], "2");
+    }
+
+    #[test]
+    fn omits_headers_when_absent() {
+        let out = edit_config("{}", &[rich_provider(&[], Vec::new())]).unwrap();
+        let doc = parse_jsonc(&out);
+        assert!(
+            doc["provider"]["maestro-foo"]["options"]
+                .get("headers")
+                .is_none(),
+            "无自定义 header 时不应写 headers"
+        );
+    }
+
+    #[test]
+    fn projects_model_limits() {
+        let m = rich_model(
+            "gpt-5",
+            ModelLimit {
+                context_window: Some(200_000),
+                max_input: Some(100_000),
+                max_output: Some(8_192),
+            },
+            Vec::new(),
+        );
+        let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
+        let doc = parse_jsonc(&out);
+        let limit = &doc["provider"]["maestro-foo"]["models"]["gpt-5"]["limit"];
+        assert_eq!(limit["context"], 200_000);
+        assert_eq!(limit["input"], 100_000);
+        assert_eq!(limit["output"], 8_192);
+    }
+
+    #[test]
+    fn projects_limit_without_optional_input() {
+        let m = rich_model(
+            "m",
+            ModelLimit {
+                context_window: Some(1_000),
+                max_input: None,
+                max_output: Some(500),
+            },
+            Vec::new(),
+        );
+        let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
+        let doc = parse_jsonc(&out);
+        let limit = &doc["provider"]["maestro-foo"]["models"]["m"]["limit"];
+        assert_eq!(limit["context"], 1_000);
+        assert_eq!(limit["output"], 500);
+        assert!(limit.get("input").is_none(), "max_input 缺省时不写 input");
+    }
+
+    #[test]
+    fn omits_limit_unless_context_and_output_both_positive() {
+        // OpenCode 的 limit 要求 context 与 output 同时存在，缺一或非正即整段省略。
+        let models = vec![
+            rich_model(
+                "only_context",
+                ModelLimit {
+                    context_window: Some(1_000),
+                    ..NO_LIMIT
+                },
+                Vec::new(),
+            ),
+            rich_model(
+                "only_output",
+                ModelLimit {
+                    max_output: Some(500),
+                    ..NO_LIMIT
+                },
+                Vec::new(),
+            ),
+            rich_model(
+                "zero",
+                ModelLimit {
+                    context_window: Some(0),
+                    max_output: Some(0),
+                    ..NO_LIMIT
+                },
+                Vec::new(),
+            ),
+        ];
+        let out = edit_config("{}", &[rich_provider(&[], models)]).unwrap();
+        let doc = parse_jsonc(&out);
+        for id in ["only_context", "only_output", "zero"] {
+            assert!(
+                doc["provider"]["maestro-foo"]["models"][id]
+                    .get("limit")
+                    .is_none(),
+                "{id} 不应写 limit"
+            );
+        }
+    }
+
+    #[test]
+    fn projects_model_capabilities() {
+        let m = rich_model(
+            "gpt-5",
+            NO_LIMIT,
+            vec![
+                ModelCapability::ToolUse,
+                ModelCapability::ImageIn,
+                ModelCapability::Thinking,
+            ],
+        );
+        let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
+        let doc = parse_jsonc(&out);
+        let entry = &doc["provider"]["maestro-foo"]["models"]["gpt-5"];
+        assert_eq!(entry["tool_call"], true);
+        assert_eq!(entry["attachment"], true);
+        assert_eq!(
+            entry["modalities"]["input"],
+            serde_json::json!(["text", "image"])
+        );
+        assert_eq!(entry["reasoning"], true);
+    }
+
+    #[test]
+    fn omits_capability_fields_when_unset() {
+        let m = rich_model("m", NO_LIMIT, Vec::new());
+        let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
+        let doc = parse_jsonc(&out);
+        let entry = &doc["provider"]["maestro-foo"]["models"]["m"];
+        for key in ["tool_call", "attachment", "modalities", "reasoning"] {
+            assert!(entry.get(key).is_none(), "未设置能力时不写 {key}");
+        }
     }
 }
