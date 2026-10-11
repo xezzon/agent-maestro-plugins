@@ -102,7 +102,7 @@ fn write_config(providers: &[Provider]) -> Result<(), String> {
             let provider_name = format!("{NAMESPACE}{}", provider.slug);
             for model in &provider.models {
                 let alias = format!("{provider_name}/{}", model.id);
-                models_table.insert(&alias, model_table(&provider_name, model));
+                models_table.insert(&alias, model_table(&provider.slug, model));
             }
         }
     }
@@ -195,8 +195,10 @@ fn provider_table(provider: &Provider, endpoint: &Endpoint) -> Item {
 }
 
 /// 单个 Model 的 model 条目：token 上限与能力均有值才写，未设置一律省略。
-/// `max_context_size` 必填，缺省时回落到 [`DEFAULT_MAX_CONTEXT_SIZE`]。
-fn model_table(provider_name: &str, model: &Model) -> Item {
+/// `max_context_size` 必填，缺省时回落到 [`DEFAULT_MAX_CONTEXT_SIZE`]；
+/// `display_name` 恒写，声明值为空时回落到裸 id 拼出的 `<provider-id>/<model-id>`。
+fn model_table(provider_id: &str, model: &Model) -> Item {
+    let provider_name = format!("{NAMESPACE}{provider_id}");
     let mut entry = Table::new();
     entry.insert(KEY_PROVIDER, value(provider_name));
     entry.insert(KEY_MODEL, value(model.id.as_str()));
@@ -222,11 +224,13 @@ fn model_table(provider_name: &str, model: &Model) -> Item {
         }
         entry.insert(KEY_CAPABILITIES, value(array));
     }
-    if let Some(name) = &model.display_name
-        && !name.is_empty()
-    {
-        entry.insert(KEY_DISPLAY_NAME, value(name.as_str()));
-    }
+    // 显示名为空时用裸 provider id 拼出 `<provider-id>/<model-id>`：
+    // 同一模型 id 挂在多个 Provider 下时仍可区分，且不带 `maestro:` 命名空间。
+    let display_name = match model.display_name.as_deref() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => format!("{provider_id}/{}", model.id),
+    };
+    entry.insert(KEY_DISPLAY_NAME, value(display_name));
     Item::Table(entry)
 }
 
@@ -297,6 +301,15 @@ mod tests {
         }
     }
 
+    fn model_with_display_name(id: &str, display_name: Option<&str>) -> Model {
+        Model {
+            id: id.to_owned(),
+            display_name: display_name.map(str::to_owned),
+            limit: NO_LIMIT,
+            capabilities: Vec::new(),
+        }
+    }
+
     /// 把构造出的条目挂到键下渲染成 TOML，再解析回来断言（兼作语法往返校验）。
     fn render(item: Item, key: &str) -> DocumentMut {
         let mut doc = DocumentMut::new();
@@ -338,7 +351,7 @@ mod tests {
             },
             Vec::new(),
         );
-        let doc = render(model_table("maestro:foo", &model), "m");
+        let doc = render(model_table("foo", &model), "m");
         assert_eq!(doc["m"]["max_context_size"].as_integer(), Some(200_000));
         assert_eq!(doc["m"]["max_input_size"].as_integer(), Some(100_000));
         assert_eq!(doc["m"]["max_output_size"].as_integer(), Some(8_192));
@@ -347,7 +360,7 @@ mod tests {
     #[test]
     fn falls_back_to_default_context_size_and_omits_optional_limits() {
         let model = model_with("m", NO_LIMIT, Vec::new());
-        let doc = render(model_table("maestro:foo", &model), "m");
+        let doc = render(model_table("foo", &model), "m");
         assert_eq!(
             doc["m"]["max_context_size"].as_integer(),
             Some(DEFAULT_MAX_CONTEXT_SIZE)
@@ -368,7 +381,7 @@ mod tests {
                 ModelCapability::Thinking,
             ],
         );
-        let doc = render(model_table("maestro:foo", &model), "m");
+        let doc = render(model_table("foo", &model), "m");
         let tags: Vec<&str> = doc["m"]["capabilities"]
             .as_array()
             .unwrap()
@@ -381,7 +394,24 @@ mod tests {
     #[test]
     fn omits_capabilities_when_unset() {
         let model = model_with("m", NO_LIMIT, Vec::new());
-        let doc = render(model_table("maestro:foo", &model), "m");
+        let doc = render(model_table("foo", &model), "m");
         assert!(!doc.to_string().contains("capabilities"));
+    }
+
+    #[test]
+    fn projects_declared_display_name() {
+        let model = model_with_display_name("gpt-5", Some("GPT-5"));
+        let doc = render(model_table("foo", &model), "m");
+        assert_eq!(doc["m"]["display_name"].as_str(), Some("GPT-5"));
+    }
+
+    #[test]
+    fn falls_back_to_provider_id_and_model_id_when_display_name_absent_or_empty() {
+        for display_name in [None, Some("")] {
+            let model = model_with_display_name("gpt-5", display_name);
+            let doc = render(model_table("foo", &model), "m");
+            assert_eq!(doc["m"]["display_name"].as_str(), Some("foo/gpt-5"));
+            assert_eq!(doc["m"]["provider"].as_str(), Some("maestro:foo"));
+        }
     }
 }

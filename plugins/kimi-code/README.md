@@ -21,7 +21,7 @@
 | Model `limit.max_input` | `max_input_size`（未设置则省略） |
 | Model `limit.max_output` | `max_output_size`（未设置则省略；Kimi Code 目前仅 anthropic provider 读取） |
 | Model `capabilities` | `capabilities = [...]`：`tool_use` / `image_in` / `thinking`（未设置则省略） |
-| Model 显示名 | `display_name`（空则省略） |
+| Model 显示名 | `display_name`（空则回落为 `<provider-id>/<model-id>`，即 `<slug>/<model-id>`） |
 
 ## 设计要点
 
@@ -29,6 +29,7 @@
 - **只重建 `maestro:` 命名空间**。`config.toml` 是 Kimi Code 与用户共享的配置文件（`default_model`、`thinking`、`permission` 等都在里面），因此本插件不像 pi 插件那样整文件重写，而是以 [`toml_edit`](https://crates.io/crates/toml_edit) 无损编辑：先删除上一轮投影的 `maestro:` 条目再写入当前列表，注释、格式与其余条目原样保留。Maestro 中已删除的 Provider 不会残留。
 - **`max_context_size` 取自 `limit.context_window`，缺省回落 131072**。该字段在 Kimi Code 中必填；Model 未声明上下文长度时写保守值 128k——声明偏小只会让 Kimi Code 提前压缩上下文，不会引发服务端报错；如与实际不符，可在 `[models."<别名>".overrides]` 中覆盖。
 - **上限、能力与自定义 header 按声明投影**。Model 的 `limit.max_input` / `limit.max_output` 分别写 `max_input_size` / `max_output_size`，`capabilities` 的 `tool_use` / `image_in` / `thinking` 映射为同名标签，Provider 的 `custom_header` 写进 `custom_headers` 表（宿主已按名排序）。未设置项一律省略——不写空表、空数组或 0。
+- **Model 显示名缺失时回落为 `<provider-id>/<model-id>`**。`display_name` 恒写：声明值非空时原样投影，为空（缺省或空串）时用 **裸 provider id（即 slug）** 拼出 `<slug>/<model-id>`（如 `foo/gpt-4o`），使同一模型 id 挂在多个 Provider 下时在 `/model` 列表中仍可区分。回落名不带 `maestro:` 命名空间——命名空间只是投影键的归属标记，不适合作为展示名。Kimi Code 自身的回落是模型 id，不含 Provider。
 - **不写 `default_model`**。投影后用 `/model` 选择即可。
 - **不支持 `KIMI_CODE_HOME` 重定向**。插件可写的目录由 manifest 的 `config_dir` 静态声明为 `$HOME/.kimi-code`。
 - 写入采用 tmp + rename 原子替换；文件解析失败时放弃写入并报错，不破坏既有配置。
