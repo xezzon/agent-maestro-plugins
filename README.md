@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | [`kimi-code`](plugins/kimi-code/README.md) | Kimi Code | 把 Maestro 中录入的 Provider 投影进 `~/.kimi-code/config.toml` |
 | [`opencode`](plugins/opencode/README.md) | OpenCode | 把 Maestro 中录入的 Provider 投影进 `~/.config/opencode/opencode.json` |
+| [`sourcegit`](plugins/sourcegit/README.md) | SourceGit | 把 Maestro 中录入的 Provider 投影进 `~/.config/SourceGit/preference.json` |
 
 ## 仓库结构
 
@@ -20,7 +21,7 @@ plugins/kimi-code/
 └── src/lib.rs
 ```
 
-`plugins/opencode/` 布局相同（crate `maestro-plugin-opencode`，依赖换为 [`jsonc-parser`](https://crates.io/crates/jsonc-parser)）。
+`plugins/opencode/`、`plugins/sourcegit/` 布局相同（crate 分别为 `maestro-plugin-opencode`、`maestro-plugin-sourcegit`，依赖换为 [`jsonc-parser`](https://crates.io/crates/jsonc-parser)；sourcegit 另有 `tests/fixtures/` 存放脱敏的 `preference.json` 样本）。
 
 SDK 统一锁定在根 `Cargo.toml` 的 `[workspace.dependencies]`（其余依赖由各插件自持），`Cargo.lock` 由工作区共享。
 
