@@ -1,18 +1,19 @@
 //! OpenCode 插件：把 Maestro 录入的 Provider 投影为
-//! `~/.config/opencode/opencode.json` 中的 `provider["maestro-<slug>"]` 条目，
+//! `~/.config/opencode/opencode.json` 中的 `providers["maestro-<slug>"]` 条目，
 //! 使录入的 Provider / 模型直接出现在 OpenCode 的 `/models` 选择器中。
 //!
 //! `opencode.json` 是 OpenCode 与用户共享的全局配置（`permission`、`mcp`、
-//! `agent` 等都住在里面），且官方支持 JSONC（注释与尾逗号）。与 kimi-code 用
+//! `agents` 等都住在里面），且官方支持 JSONC（注释与尾逗号）。与 kimi-code 用
 //! `toml_edit` 的做法对齐，本插件经 [`jsonc_parser`] 的 CST 无损编辑：只重建
 //! `maestro-` 前缀的 provider 条目，注释、格式与其余内容原样保留。
 //!
-//! OpenCode 的自定义 provider 挂在一个 AI SDK npm 包上，一种协议一个 provider；
-//! provider id 与 models.dev 内置目录共享命名空间，故加 `maestro-` 前缀防撞名，
-//! 该前缀同时充当清理旧条目的匹配依据（对齐 kimi-code 的 `maestro:` 命名空间）。
+//! OpenCode 2 把自定义 provider 放在顶层 `providers`（v1 的 `provider` 已废弃）；
+//! 一个 provider 挂在一个 AI SDK 包上，一种协议一个 provider。provider id 与
+//! models.dev 内置目录共享命名空间，故加 `maestro-` 前缀防撞名，该前缀同时充当
+//! 清理旧条目的匹配依据（对齐 kimi-code 的 `maestro:` 命名空间）。
 //!
 //! Provider 可同时携带两种协议的端点与界面记录的投影选择；投影使用哪个端点由
-//! 插件按 ADR 0016 的规则裁定，再据选中端点的协议挂对应的 AI SDK npm 包。
+//! 插件按 ADR 0016 的规则裁定，再据选中端点的协议挂对应的 AI SDK 包。
 //!
 //! 依赖 [`maestro-plugin-sdk`]（`maestro:plugin` 合同的类型化绑定），实现其
 //! `Guest` trait。宿主把 manifest 声明的 config_dir（即 `$HOME/.config/opencode`）
@@ -36,22 +37,26 @@ const SCHEMA_URL: &str = "https://opencode.ai/config.json";
 /// 旧条目，避免误伤用户手工配置的条目（OpenCode 的 provider id 与 models.dev
 /// 内置目录共享命名空间，`anthropic`、`openai` 等是内置 id）。
 const NAMESPACE: &str = "maestro-";
-const KEY_PROVIDER: &str = "provider";
-const KEY_NPM: &str = "npm";
-const KEY_OPTIONS: &str = "options";
+/// OpenCode 2 的 provider 表（v1 的 `provider` 已废弃）。
+const KEY_PROVIDERS: &str = "providers";
+/// 已废弃的 v1 provider 表：仅用于清理本插件早期版本写入的残留条目。
+const LEGACY_KEY_PROVIDER: &str = "provider";
+const KEY_PACKAGE: &str = "package";
+const KEY_SETTINGS: &str = "settings";
 const KEY_BASE_URL: &str = "baseURL";
 const KEY_API_KEY: &str = "apiKey";
 const KEY_MODELS: &str = "models";
 const KEY_NAME: &str = "name";
 const KEY_HEADERS: &str = "headers";
-const KEY_LIMIT: &str = "limit";
+const KEY_CAPABILITIES: &str = "capabilities";
+const KEY_TOOLS: &str = "tools";
 const KEY_INPUT: &str = "input";
+const KEY_LIMIT: &str = "limit";
 const KEY_CONTEXT: &str = "context";
 const KEY_OUTPUT: &str = "output";
-const KEY_TOOL_CALL: &str = "tool_call";
-const KEY_ATTACHMENT: &str = "attachment";
-const KEY_MODALITIES: &str = "modalities";
-const KEY_REASONING: &str = "reasoning";
+/// OpenCode 的 `package` 用 `aisdk:` 前缀标记 AI SDK 包（对齐 `Provider.aisdk`；
+/// v1→v2 迁移的 `packageSpecifier` 即把 npm 名编码成这种形式）。
+const AISDK_PREFIX: &str = "aisdk:";
 const NPM_OPENAI_COMPATIBLE: &str = "@ai-sdk/openai-compatible";
 const NPM_ANTHROPIC: &str = "@ai-sdk/anthropic";
 /// 解析选项：只放行 OpenCode 官方支持的 JSONC 扩展（注释与尾逗号），其余宽松
@@ -113,13 +118,16 @@ fn edit_config(text: &str, providers: &[Provider]) -> Result<String, String> {
         .object_value()
         .ok_or_else(|| "根节点不是对象，为避免破坏既有配置已放弃写入".to_owned())?;
 
-    let provider_obj = match root_obj.get(KEY_PROVIDER) {
+    // 先清理早期版本遗留在已废弃 `provider` 表里的条目，再重建 `providers`。
+    remove_legacy_namespace(&root_obj);
+
+    let provider_obj = match root_obj.get(KEY_PROVIDERS) {
         Some(prop) => prop
             .value()
             .and_then(|v| v.as_object())
-            .ok_or_else(|| "provider 已存在但不是对象，为避免破坏既有配置已放弃写入".to_owned())?,
+            .ok_or_else(|| "providers 已存在但不是对象，为避免破坏既有配置已放弃写入".to_owned())?,
         None => root_obj
-            .append(KEY_PROVIDER, CstInputValue::Object(vec![]))
+            .append(KEY_PROVIDERS, CstInputValue::Object(vec![]))
             .object_value_or_set(),
     };
 
@@ -174,6 +182,22 @@ fn remove_namespace_entries(provider_obj: &CstObject) {
     }
 }
 
+/// 清理已废弃的 v1 `provider` 表里本插件早期版本写入的 `maestro-` 条目：
+/// OpenCode 2 会把 `provider` 迁移进 `providers`，若不同步清理就会与新条目重复。
+/// 整表被清空时一并移除该字段，只保留用户手写的条目。
+fn remove_legacy_namespace(root_obj: &CstObject) {
+    let Some(prop) = root_obj.get(LEGACY_KEY_PROVIDER) else {
+        return;
+    };
+    let Some(legacy) = prop.value().and_then(|value| value.as_object()) else {
+        return;
+    };
+    remove_namespace_entries(&legacy);
+    if legacy.properties().is_empty() {
+        prop.remove();
+    }
+}
+
 /// 选择投影端点（ADR 0016）：
 /// 1. 界面所选协议确有端点 → 用它；
 /// 2. 否则只剩一个端点 → 用它（覆盖旧配置无选择、选择失效两类情形）；
@@ -197,7 +221,7 @@ fn effective_endpoint(provider: &Provider) -> Option<&Endpoint> {
         .or_else(|| provider.endpoints.first())
 }
 
-/// 协议透传为 OpenCode 挂载的 AI SDK npm 包。
+/// 协议透传为 OpenCode 挂载的 AI SDK 包名。
 fn provider_npm(protocol: &Protocol) -> &'static str {
     match protocol {
         Protocol::OpenaiCompletions => NPM_OPENAI_COMPATIBLE,
@@ -205,27 +229,20 @@ fn provider_npm(protocol: &Protocol) -> &'static str {
     }
 }
 
-/// 单个 Provider 的 OpenCode 条目：`npm` 包、`options`（`baseURL` 与可选的
-/// `apiKey`、`headers`）及 `models`。`npm` 与 `baseURL` 取自
+/// 单个 Provider 的 OpenCode 条目：`package`（AI SDK 包）、`settings`（`baseURL`
+/// 与可选的 `apiKey`）、可选的 `headers` 及 `models`。`package` 与 `baseURL` 取自
 /// [`effective_endpoint`] 选出的端点，`apiKey` 与 `headers` 为 Provider 级。
 fn provider_entry(provider: &Provider, endpoint: &Endpoint) -> CstInputValue {
-    let mut options = vec![(
+    let mut settings = vec![(
         KEY_BASE_URL.to_owned(),
         CstInputValue::from(endpoint.base_url.as_str()),
     )];
     // 无凭证时宿主传 None，本地网关模型在 OpenCode 中仍可见；
     // 用户可自行补 apiKey 或用 {env:VAR} / {file:path} 插值兜底。
     if let Some(api_key) = &provider.api_key {
-        options.push((
+        settings.push((
             KEY_API_KEY.to_owned(),
             CstInputValue::from(api_key.as_str()),
-        ));
-    }
-    // 没有自定义 header 时省略整段，不写空对象。
-    if !provider.custom_header.is_empty() {
-        options.push((
-            KEY_HEADERS.to_owned(),
-            headers_value(&provider.custom_header),
         ));
     }
 
@@ -235,11 +252,23 @@ fn provider_entry(provider: &Provider, endpoint: &Endpoint) -> CstInputValue {
         .map(|model| (model.id.clone(), model_entry(model)))
         .collect();
 
-    CstInputValue::Object(vec![
-        (KEY_NPM.to_owned(), provider_npm(&endpoint.protocol).into()),
-        (KEY_OPTIONS.to_owned(), CstInputValue::Object(options)),
-        (KEY_MODELS.to_owned(), CstInputValue::Object(models)),
-    ])
+    let package = format!("{AISDK_PREFIX}{}", provider_npm(&endpoint.protocol));
+    let mut entry = vec![
+        (
+            KEY_PACKAGE.to_owned(),
+            CstInputValue::from(package.as_str()),
+        ),
+        (KEY_SETTINGS.to_owned(), CstInputValue::Object(settings)),
+    ];
+    // 没有自定义 header 时省略整段，不写空对象。
+    if !provider.custom_header.is_empty() {
+        entry.push((
+            KEY_HEADERS.to_owned(),
+            headers_value(&provider.custom_header),
+        ));
+    }
+    entry.push((KEY_MODELS.to_owned(), CstInputValue::Object(models)));
+    CstInputValue::Object(entry)
 }
 
 /// 自定义 header：`name` → `value` 对象。宿主已按名排序，此处不再重排。
@@ -257,7 +286,7 @@ fn headers_value(headers: &[CustomHeader]) -> CstInputValue {
     )
 }
 
-/// 单个 Model 的条目：显示名、token 上限与能力均有值才写，未设置一律省略。
+/// 单个 Model 的条目：显示名、能力与 token 上限均有值才写，未设置一律省略。
 fn model_entry(model: &Model) -> CstInputValue {
     let mut entry = Vec::new();
     // 合同未携带 Model 展示名时省略 name 字段。
@@ -266,38 +295,46 @@ fn model_entry(model: &Model) -> CstInputValue {
     {
         entry.push((KEY_NAME.to_owned(), CstInputValue::from(name.as_str())));
     }
+    if let Some(capabilities) = model_capabilities(model) {
+        entry.push((KEY_CAPABILITIES.to_owned(), capabilities));
+    }
     if let Some(limit) = model_limit(model) {
         entry.push((KEY_LIMIT.to_owned(), limit));
-    }
-    if model.capabilities.contains(&ModelCapability::ToolUse) {
-        entry.push((KEY_TOOL_CALL.to_owned(), true.into()));
-    }
-    // 能收图即两种模态都写：OpenCode 的 modalities.input 是完整列表，
-    // 没有「只收图不收字」的模型。attachment 与 models.dev 的模型对象一致同置。
-    if model.capabilities.contains(&ModelCapability::ImageIn) {
-        entry.push((KEY_ATTACHMENT.to_owned(), true.into()));
-        entry.push((
-            KEY_MODALITIES.to_owned(),
-            CstInputValue::Object(vec![(KEY_INPUT.to_owned(), vec!["text", "image"].into())]),
-        ));
-    }
-    if model.capabilities.contains(&ModelCapability::Thinking) {
-        entry.push((KEY_REASONING.to_owned(), true.into()));
     }
     CstInputValue::Object(entry)
 }
 
-/// Model 的 token 上限。OpenCode 的 `limit` 要求 `context` 与 `output` 同时存在
-/// （schema 二者皆必填），故只在两者都有正值时写出整段；`input` 可选，随其一并写。
-fn model_limit(model: &Model) -> Option<CstInputValue> {
-    let context = positive(model.limit.context_window)?;
-    let output = positive(model.limit.max_output)?;
-    let mut entries = vec![(KEY_CONTEXT.to_owned(), context.into())];
-    if let Some(input) = positive(model.limit.max_input) {
-        entries.push((KEY_INPUT.to_owned(), input.into()));
+/// Model 的能力声明（`capabilities`）。OpenCode 2 用 `capabilities.tools` 表示工具
+/// 调用、`capabilities.input` 表示可接收的模态；能力只在声明为正时写出，未设置一律
+/// 省略（沿用「不写 false / 空数组」的约定）。OpenCode 2 没有模型级 reasoning 开关，
+/// 故 Maestro 的 `thinking` 不再投影。
+fn model_capabilities(model: &Model) -> Option<CstInputValue> {
+    let mut fields = Vec::new();
+    if model.capabilities.contains(&ModelCapability::ToolUse) {
+        fields.push((KEY_TOOLS.to_owned(), true.into()));
     }
-    entries.push((KEY_OUTPUT.to_owned(), output.into()));
-    Some(CstInputValue::Object(entries))
+    // 能收图即两种模态都写：OpenCode 的 capabilities.input 是完整列表，
+    // 没有「只收图不收字」的模型。
+    if model.capabilities.contains(&ModelCapability::ImageIn) {
+        fields.push((KEY_INPUT.to_owned(), vec!["text", "image"].into()));
+    }
+    (!fields.is_empty()).then(|| CstInputValue::Object(fields))
+}
+
+/// Model 的 token 上限。OpenCode 2 的 `limit` 三个字段都是可选的，故每个声明的
+/// 正值各自写出，只按有值与否省略。
+fn model_limit(model: &Model) -> Option<CstInputValue> {
+    let mut fields = Vec::new();
+    if let Some(context) = positive(model.limit.context_window) {
+        fields.push((KEY_CONTEXT.to_owned(), context.into()));
+    }
+    if let Some(input) = positive(model.limit.max_input) {
+        fields.push((KEY_INPUT.to_owned(), input.into()));
+    }
+    if let Some(output) = positive(model.limit.max_output) {
+        fields.push((KEY_OUTPUT.to_owned(), output.into()));
+    }
+    (!fields.is_empty()).then(|| CstInputValue::Object(fields))
 }
 
 /// 声明式上限只在为正时才投影：0 是唯一可能的非正取值（`u32` 承载，
@@ -312,6 +349,10 @@ export!(OpenCodePlugin);
 mod tests {
     use super::*;
     use maestro_plugin_sdk::{CustomHeader, Endpoint, Model, ModelCapability, ModelLimit};
+
+    /// `package` 字段的期望字面值：v1 的 `npm` 经 OpenCode 迁移后带 `aisdk:` 前缀。
+    const PACKAGE_OPENAI: &str = "aisdk:@ai-sdk/openai-compatible";
+    const PACKAGE_ANTHROPIC: &str = "aisdk:@ai-sdk/anthropic";
 
     /// 投影结果带注释（JSONC），用 jsonc-parser 解析成 serde_json::Value 再断言，
     /// 同时兼作输出可被 JSONC 解析器读回的往返校验。
@@ -395,17 +436,20 @@ mod tests {
         let out = edit_config("", &[openai("foo", &[("gpt-5", Some("GPT-5"))])]).unwrap();
         let doc = parse_jsonc(&out);
         assert_eq!(doc[SCHEMA_KEY], SCHEMA_URL);
-        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_OPENAI_COMPATIBLE);
         assert_eq!(
-            doc["provider"]["maestro-foo"]["options"]["baseURL"],
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_OPENAI)
+        );
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
             "https://gateway.example.com/v1"
         );
         assert_eq!(
-            doc["provider"]["maestro-foo"]["options"]["apiKey"],
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_API_KEY],
             "sk-..."
         );
         assert_eq!(
-            doc["provider"]["maestro-foo"]["models"]["gpt-5"]["name"],
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]["gpt-5"][KEY_NAME],
             "GPT-5"
         );
     }
@@ -415,11 +459,11 @@ mod tests {
         let input = r#"{
   // model config
   "model": "some/model",
-  "permission": { "edit": "allow" }, // allow edits
-  "provider": {
+  "permissions": [],
+  "providers": {
     "my-own": {
-      "npm": "@ai-sdk/openai-compatible", // hand-written entry
-      "options": { "baseURL": "https://my.example.com/v1", },
+      "package": "@ai-sdk/openai-compatible", // hand-written entry
+      "settings": { "baseURL": "https://my.example.com/v1", },
     },
   },
 }
@@ -428,39 +472,80 @@ mod tests {
         // 投影本身是合法 JSON，且用户内容原样保留。
         let doc = parse_jsonc(&out);
         assert_eq!(doc["model"], "some/model");
-        assert_eq!(doc["permission"]["edit"], "allow");
         assert_eq!(
-            doc["provider"]["my-own"]["options"]["baseURL"],
+            doc[KEY_PROVIDERS]["my-own"][KEY_SETTINGS][KEY_BASE_URL],
             "https://my.example.com/v1"
         );
         assert!(out.contains("// model config"));
         assert!(out.contains("// hand-written entry"));
-        assert!(out.contains("\"maestro-foo\""));
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_OPENAI)
+        );
     }
 
     #[test]
     fn reprojection_replaces_entries_and_removes_stale_ones() {
         let input = r#"{
+  "providers": {
+    "maestro-old": { "package": "@ai-sdk/openai-compatible", "settings": { "baseURL": "https://old.example.com/v1" }, "models": {} },
+    "my-own": { "package": "@ai-sdk/openai-compatible", "settings": { "baseURL": "https://my.example.com/v1" } }
+  }
+}"#;
+        let out = edit_config(input, &[openai("foo", &[("gpt-5", None)])]).unwrap();
+        let doc = parse_jsonc(&out);
+        assert!(
+            doc[KEY_PROVIDERS].get("maestro-old").is_none(),
+            "旧条目应被清理"
+        );
+        assert!(
+            doc[KEY_PROVIDERS].get("my-own").is_some(),
+            "用户条目不应误伤"
+        );
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
+            "https://gateway.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn cleans_stale_entries_from_legacy_provider_table() {
+        // 早期版本写进已废弃 `provider` 表的条目必须清理，否则 OpenCode 迁移后会重复。
+        let input = r#"{
   "provider": {
-    "maestro-old": { "npm": "@ai-sdk/openai-compatible", "options": { "baseURL": "https://old.example.com/v1" }, "models": {} },
+    "maestro-old": { "npm": "@ai-sdk/openai-compatible", "options": { "baseURL": "https://old.example.com/v1" } },
     "my-own": { "npm": "@ai-sdk/openai-compatible", "options": { "baseURL": "https://my.example.com/v1" } }
   }
 }"#;
         let out = edit_config(input, &[openai("foo", &[("gpt-5", None)])]).unwrap();
         let doc = parse_jsonc(&out);
         assert!(
-            doc["provider"].get("maestro-old").is_none(),
-            "旧条目应被清理"
+            doc[LEGACY_KEY_PROVIDER].get("maestro-old").is_none(),
+            "v1 残留应被清理"
         );
-        assert!(doc["provider"].get("my-own").is_some(), "用户条目不应误伤");
+        assert!(
+            doc[LEGACY_KEY_PROVIDER].get("my-own").is_some(),
+            "用户手写条目不应误伤"
+        );
         assert_eq!(
-            doc["provider"]["maestro-foo"]["options"]["baseURL"],
-            "https://gateway.example.com/v1"
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_OPENAI)
         );
     }
 
     #[test]
-    fn anthropic_protocol_maps_npm_package() {
+    fn removes_legacy_provider_table_once_emptied() {
+        let input = r#"{ "provider": { "maestro-old": { "npm": "@ai-sdk/openai-compatible" } } }"#;
+        let out = edit_config(input, &[]).unwrap();
+        let doc = parse_jsonc(&out);
+        assert!(
+            doc.get(LEGACY_KEY_PROVIDER).is_none(),
+            "清空后的 v1 provider 表应整体移除"
+        );
+    }
+
+    #[test]
+    fn anthropic_protocol_maps_package() {
         let p = provider(
             "foo",
             Protocol::AnthropicMessages,
@@ -470,14 +555,17 @@ mod tests {
         );
         let out = edit_config("{}", &[p]).unwrap();
         let doc = parse_jsonc(&out);
-        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_ANTHROPIC);
         assert_eq!(
-            doc["provider"]["maestro-foo"]["models"]["claude-5"]["name"],
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_ANTHROPIC)
+        );
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]["claude-5"][KEY_NAME],
             "Claude 5"
         );
         assert!(
-            doc["provider"]["maestro-foo"]["options"]
-                .get("apiKey")
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS]
+                .get(KEY_API_KEY)
                 .is_none()
         );
     }
@@ -493,42 +581,46 @@ mod tests {
         );
         let out = edit_config("{}", &[p]).unwrap();
         let doc = parse_jsonc(&out);
-        let entry = &doc["provider"]["maestro-foo"];
+        let entry = &doc[KEY_PROVIDERS]["maestro-foo"];
         assert!(
-            entry["options"].get("apiKey").is_none(),
+            entry[KEY_SETTINGS].get(KEY_API_KEY).is_none(),
             "无凭证不写 apiKey"
         );
         assert!(
-            entry["models"]["m1"].get("name").is_none(),
+            entry[KEY_MODELS]["m1"].get(KEY_NAME).is_none(),
             "空显示名省略 name"
         );
-        assert!(entry["models"]["m2"].get("name").is_none());
+        assert!(entry[KEY_MODELS]["m2"].get(KEY_NAME).is_none());
     }
 
     #[test]
     fn empty_provider_list_clears_namespace_only() {
         let input = r#"{
   // comment
-  "provider": {
-    "maestro-old": { "npm": "@ai-sdk/openai-compatible" },
-    "my-own": { "npm": "@ai-sdk/openai-compatible" }
+  "providers": {
+    "maestro-old": { "package": "@ai-sdk/openai-compatible" },
+    "my-own": { "package": "@ai-sdk/openai-compatible" }
   }
 }"#;
         let out = edit_config(input, &[]).unwrap();
         let doc = parse_jsonc(&out);
-        assert_eq!(doc["provider"].as_object().unwrap().len(), 1);
+        assert_eq!(doc[KEY_PROVIDERS].as_object().unwrap().len(), 1);
+        assert!(doc[KEY_PROVIDERS].get("maestro-old").is_none());
         assert!(out.contains("// comment"));
     }
 
     #[test]
-    fn appends_provider_key_when_missing() {
+    fn appends_providers_key_when_missing() {
         let out =
             edit_config("{\n  \"model\": \"some/model\"\n}\n", &[openai("foo", &[])]).unwrap();
         let doc = parse_jsonc(&out);
         assert_eq!(doc["model"], "some/model");
-        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_OPENAI_COMPATIBLE);
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_OPENAI)
+        );
         assert!(
-            doc["provider"]["maestro-foo"]["models"]
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]
                 .as_object()
                 .unwrap()
                 .is_empty()
@@ -537,7 +629,7 @@ mod tests {
 
     #[test]
     fn rejects_broken_json() {
-        let input = "{ \"provider\": { }\n"; // 缺右括号
+        let input = "{ \"providers\": { }\n"; // 缺右括号
         let err = edit_config(input, &[]).unwrap_err();
         assert!(err.contains("解析 opencode.json 失败"), "实际错误：{err}");
     }
@@ -547,7 +639,10 @@ mod tests {
         let out = edit_config("", &[openai("foo", &[])]).unwrap();
         let doc = parse_jsonc(&out);
         assert_eq!(doc[SCHEMA_KEY], SCHEMA_URL);
-        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_OPENAI_COMPATIBLE);
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_OPENAI)
+        );
     }
 
     #[test]
@@ -557,22 +652,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_object_provider() {
-        let err = edit_config("{ \"provider\": 42 }", &[]).unwrap_err();
-        assert!(err.contains("provider 已存在但不是对象"), "实际错误：{err}");
+    fn rejects_non_object_providers() {
+        let err = edit_config("{ \"providers\": 42 }", &[]).unwrap_err();
+        assert!(
+            err.contains("providers 已存在但不是对象"),
+            "实际错误：{err}"
+        );
     }
 
     #[test]
     fn accepts_comments_and_trailing_commas_only() {
         // OpenCode 官方支持的 JSONC 扩展必须放行。
-        let input = "{ // comment\n  \"model\": \"a\",\n  \"provider\": {},\n}";
+        let input = "{ // comment\n  \"model\": \"a\",\n  \"providers\": {},\n}";
         edit_config(input, &[]).unwrap();
     }
 
     #[test]
     fn rejects_syntax_beyond_jsonc() {
         // 缺逗号：jsonc-parser 默认允许，但 OpenCode 读不回，必须拒绝。
-        let err = edit_config("{ \"model\": \"a\" \"provider\": {} }", &[]).unwrap_err();
+        let err = edit_config("{ \"model\": \"a\" \"providers\": {} }", &[]).unwrap_err();
         assert!(err.contains("解析 opencode.json 失败"), "实际错误：{err}");
         // 单引号字符串同理。
         let err = edit_config("{ 'model': 'a' }", &[]).unwrap_err();
@@ -590,9 +688,12 @@ mod tests {
         );
         let out = edit_config("{}", &[p]).unwrap();
         let doc = parse_jsonc(&out);
-        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_ANTHROPIC);
         assert_eq!(
-            doc["provider"]["maestro-foo"]["options"]["baseURL"],
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_ANTHROPIC)
+        );
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
             "https://anthropic.example.com"
         );
     }
@@ -608,9 +709,12 @@ mod tests {
         );
         let out = edit_config("{}", &[p]).unwrap();
         let doc = parse_jsonc(&out);
-        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_OPENAI_COMPATIBLE);
         assert_eq!(
-            doc["provider"]["maestro-foo"]["options"]["baseURL"],
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_OPENAI)
+        );
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
             "https://openai.example.com/v1"
         );
     }
@@ -628,9 +732,12 @@ mod tests {
         p.selected_protocol = Some(Protocol::OpenaiCompletions);
         let out = edit_config("{}", &[p]).unwrap();
         let doc = parse_jsonc(&out);
-        assert_eq!(doc["provider"]["maestro-foo"]["npm"], NPM_ANTHROPIC);
         assert_eq!(
-            doc["provider"]["maestro-foo"]["options"]["baseURL"],
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_PACKAGE].as_str(),
+            Some(PACKAGE_ANTHROPIC)
+        );
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
             "https://anthropic.example.com"
         );
     }
@@ -673,13 +780,17 @@ mod tests {
     };
 
     #[test]
-    fn projects_custom_headers_into_provider_options() {
+    fn projects_custom_headers_at_provider_level() {
         let p = rich_provider(&[("X-A", "1"), ("X-B", "2")], Vec::new());
         let out = edit_config("{}", &[p]).unwrap();
         let doc = parse_jsonc(&out);
-        let headers = &doc["provider"]["maestro-foo"]["options"]["headers"];
-        assert_eq!(headers["X-A"], "1");
-        assert_eq!(headers["X-B"], "2");
+        let entry = &doc[KEY_PROVIDERS]["maestro-foo"];
+        assert_eq!(entry[KEY_HEADERS]["X-A"], "1");
+        assert_eq!(entry[KEY_HEADERS]["X-B"], "2");
+        assert!(
+            entry[KEY_SETTINGS].get(KEY_HEADERS).is_none(),
+            "headers 不再嵌在 settings 内"
+        );
     }
 
     #[test]
@@ -687,9 +798,7 @@ mod tests {
         let out = edit_config("{}", &[rich_provider(&[], Vec::new())]).unwrap();
         let doc = parse_jsonc(&out);
         assert!(
-            doc["provider"]["maestro-foo"]["options"]
-                .get("headers")
-                .is_none(),
+            doc[KEY_PROVIDERS]["maestro-foo"].get(KEY_HEADERS).is_none(),
             "无自定义 header 时不应写 headers"
         );
     }
@@ -707,10 +816,10 @@ mod tests {
         );
         let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
         let doc = parse_jsonc(&out);
-        let limit = &doc["provider"]["maestro-foo"]["models"]["gpt-5"]["limit"];
-        assert_eq!(limit["context"], 200_000);
-        assert_eq!(limit["input"], 100_000);
-        assert_eq!(limit["output"], 8_192);
+        let limit = &doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]["gpt-5"][KEY_LIMIT];
+        assert_eq!(limit[KEY_CONTEXT], 200_000);
+        assert_eq!(limit[KEY_INPUT], 100_000);
+        assert_eq!(limit[KEY_OUTPUT], 8_192);
     }
 
     #[test]
@@ -726,15 +835,15 @@ mod tests {
         );
         let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
         let doc = parse_jsonc(&out);
-        let limit = &doc["provider"]["maestro-foo"]["models"]["m"]["limit"];
-        assert_eq!(limit["context"], 1_000);
-        assert_eq!(limit["output"], 500);
-        assert!(limit.get("input").is_none(), "max_input 缺省时不写 input");
+        let limit = &doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]["m"][KEY_LIMIT];
+        assert_eq!(limit[KEY_CONTEXT], 1_000);
+        assert_eq!(limit[KEY_OUTPUT], 500);
+        assert!(limit.get(KEY_INPUT).is_none(), "max_input 缺省时不写 input");
     }
 
     #[test]
-    fn omits_limit_unless_context_and_output_both_positive() {
-        // OpenCode 的 limit 要求 context 与 output 同时存在，缺一或非正即整段省略。
+    fn projects_partial_limits() {
+        // OpenCode 2 的 limit 三个字段都可选，故各自写出，不再要求 context/output 同时存在。
         let models = vec![
             rich_model(
                 "only_context",
@@ -753,6 +862,14 @@ mod tests {
                 Vec::new(),
             ),
             rich_model(
+                "only_input",
+                ModelLimit {
+                    max_input: Some(20),
+                    ..NO_LIMIT
+                },
+                Vec::new(),
+            ),
+            rich_model(
                 "zero",
                 ModelLimit {
                     context_window: Some(0),
@@ -764,14 +881,13 @@ mod tests {
         ];
         let out = edit_config("{}", &[rich_provider(&[], models)]).unwrap();
         let doc = parse_jsonc(&out);
-        for id in ["only_context", "only_output", "zero"] {
-            assert!(
-                doc["provider"]["maestro-foo"]["models"][id]
-                    .get("limit")
-                    .is_none(),
-                "{id} 不应写 limit"
-            );
-        }
+        let models = &doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS];
+        assert_eq!(models["only_context"][KEY_LIMIT][KEY_CONTEXT], 1_000);
+        assert!(models["only_context"][KEY_LIMIT].get(KEY_OUTPUT).is_none());
+        assert_eq!(models["only_output"][KEY_LIMIT][KEY_OUTPUT], 500);
+        assert!(models["only_output"][KEY_LIMIT].get(KEY_CONTEXT).is_none());
+        assert_eq!(models["only_input"][KEY_LIMIT][KEY_INPUT], 20);
+        assert!(models["zero"].get(KEY_LIMIT).is_none(), "非正值不写 limit");
     }
 
     #[test]
@@ -787,14 +903,16 @@ mod tests {
         );
         let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
         let doc = parse_jsonc(&out);
-        let entry = &doc["provider"]["maestro-foo"]["models"]["gpt-5"];
-        assert_eq!(entry["tool_call"], true);
-        assert_eq!(entry["attachment"], true);
+        let entry = &doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]["gpt-5"];
+        assert_eq!(entry[KEY_CAPABILITIES][KEY_TOOLS], true);
         assert_eq!(
-            entry["modalities"]["input"],
+            entry[KEY_CAPABILITIES][KEY_INPUT],
             serde_json::json!(["text", "image"])
         );
-        assert_eq!(entry["reasoning"], true);
+        // v2 已移除模型级 reasoning / attachment / modalities / tool_call 字段。
+        for key in ["tool_call", "attachment", "modalities", "reasoning"] {
+            assert!(entry.get(key).is_none(), "v2 不应写 {key}");
+        }
     }
 
     #[test]
@@ -802,9 +920,10 @@ mod tests {
         let m = rich_model("m", NO_LIMIT, Vec::new());
         let out = edit_config("{}", &[rich_provider(&[], vec![m])]).unwrap();
         let doc = parse_jsonc(&out);
-        let entry = &doc["provider"]["maestro-foo"]["models"]["m"];
-        for key in ["tool_call", "attachment", "modalities", "reasoning"] {
-            assert!(entry.get(key).is_none(), "未设置能力时不写 {key}");
-        }
+        let entry = &doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]["m"];
+        assert!(
+            entry.get(KEY_CAPABILITIES).is_none(),
+            "未设置能力时不写 capabilities"
+        );
     }
 }

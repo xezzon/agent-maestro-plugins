@@ -4,6 +4,7 @@
   "entry": "target/wasm32-wasip2/release/maestro_plugin_opencode.wasm",
   "upstream": {
     "url": "https://opencode.ai/",
+    "schema": "https://opencode.ai/config.json",
     "repository": "https://github.com/anomalyco/opencode",
     "npm": "@opencode/cli",
     "version": "2.0.22"
