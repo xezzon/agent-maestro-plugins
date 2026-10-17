@@ -31,7 +31,7 @@ SourceGit 硬编码官方 OpenAI SDK，没有 anthropic-messages 分支，故本
 
 `ExtraHeaders` 是多行文本，SourceGit 按行拆分后逐行加成 HTTP 头，故两类 header 不投影（各记一条警告日志）：
 
-- **名字与 `Authorization` 撞名**（大小写不敏感）：SourceGit 的非 Azure 路径恒发 `Authorization: Bearer <ApiKey>`，同名自定义头会与之冲突。API Key 已经由 `ApiKey` 承载，无需再投影一份。
+- **名字与 `Authorization` 撞名**（大小写不敏感；按 SourceGit 的规则先去掉名字两侧空白再比较，`" Authorization "` 同样挡下）：SourceGit 的非 Azure 路径恒发 `Authorization: Bearer <ApiKey>`，同名自定义头会与之冲突。API Key 已经由 `ApiKey` 承载，无需再投影一份。
 - **名字或值含 `CR` / `LF`**：会被 SourceGit 按行拆开，一条头变两条，等于让用户配置伪造出一个新请求头。
 
 警告日志只带 header 的**名字**，绝不带值——值可能是凭证。
@@ -47,6 +47,8 @@ SourceGit 硬编码官方 OpenAI SDK，没有 anthropic-messages 分支，故本
 原因有二：SourceGit 的反序列化会抛异常，而更糟的是**读取失败时它会静默重置为一份全新默认配置**，用户下次保存即整份覆盖既有设置。宁可什么都不写，也不写一份 SourceGit 读不回的 JSON。
 
 （实现细节：`CstRootNode::parse` 按 `CommentCollectionStrategy::AsTokens` 收集注释，`ParseOptions::allow_comments` 对它无效，故注释由 `parse_document` 自行遍历 CST 挡掉。）
+
+`OpenAIServices` 在顶层重复出现时同样放弃写入：CST 取第一个同名键，SourceGit 的 `System.Text.Json` 取最后一个，无法确定该改哪一个；继续投影会「成功」而 SourceGit 仍读旧数组。
 
 ## 设计要点
 

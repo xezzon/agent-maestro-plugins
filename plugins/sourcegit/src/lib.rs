@@ -176,9 +176,23 @@ fn new_document() -> Result<CstRootNode, String> {
         .map_err(|e| format!("初始化新 {CONFIG_FILE} 失败\n原因：{e}"))
 }
 
-/// 取出（或创建）`OpenAIServices` 数组；已存在但不是数组时放弃写入。
+/// 取出（或创建）`OpenAIServices` 数组；已存在但不是数组、或同名键重复时放弃写入。
+///
+/// 重复键必须拒绝：CST 的 `get` 取第一个，而 SourceGit 的 `System.Text.Json`
+/// 反序列化取最后一个，编辑前者会「投影成功」但 SourceGit 读到的仍是旧的数组。
 fn services_array(root_obj: &CstObject) -> Result<CstArray, String> {
-    match root_obj.get(KEY_SERVICES) {
+    let mut matches = root_obj
+        .properties()
+        .into_iter()
+        .filter(|prop| prop.decoded_name().as_deref() == Some(KEY_SERVICES));
+    let first = matches.next();
+    if matches.next().is_some() {
+        return Err(format!(
+            "{KEY_SERVICES} 在配置中重复出现，无法确定 SourceGit 会读取哪一个，\
+             为避免破坏既有配置已放弃写入"
+        ));
+    }
+    match first {
         Some(prop) => prop.value().and_then(|v| v.as_array()).ok_or_else(|| {
             format!("{KEY_SERVICES} 已存在但不是数组，为避免破坏既有配置已放弃写入")
         }),
@@ -312,8 +326,11 @@ fn extra_headers(provider: &Provider, warnings: &mut Vec<String>) -> String {
 /// 两类：`Authorization` 与 SourceGit 恒发的 `Authorization: Bearer <ApiKey>` 撞名
 /// （HTTP 头名大小写不敏感，故大小写都要挡）；名字或值带 `CR`/`LF` 会被 SourceGit
 /// 按行拆开——一条头变两条，等于让用户配置伪造出一个新请求头。
+///
+/// 比较前先 `trim`：SourceGit 逐行在第一个 `:` 处切分后会把名字两侧的空白去掉，
+/// 不规范化就会让 `" Authorization "` 绕过检查、trim 后仍与 Bearer 头撞名。
 fn unprojectable(header: &CustomHeader) -> Option<&'static str> {
-    if header.name.eq_ignore_ascii_case(AUTH_HEADER) {
+    if header.name.trim().eq_ignore_ascii_case(AUTH_HEADER) {
         return Some("SourceGit already sends it from ApiKey");
     }
     if has_line_break(&header.name) || has_line_break(&header.value) {
@@ -496,10 +513,17 @@ mod tests {
     }
 
     /// SourceGit 非 Azure 路径恒由官方 OpenAI SDK 发 `Authorization: Bearer <ApiKey>`，
-    /// 再投影一个同名头只会在请求里出现两个 Authorization。
+    /// 再投影一个同名头只会在请求里出现两个 Authorization。SourceGit 会先去掉名字
+    /// 两侧的空白，故带空白的名字同样要挡。
     #[test]
-    fn omits_authorization_header_whatever_its_case() {
-        for name in ["Authorization", "authorization", "AUTHORIZATION"] {
+    fn omits_authorization_header_whatever_its_case_or_padding() {
+        for name in [
+            "Authorization",
+            "authorization",
+            "AUTHORIZATION",
+            " Authorization ",
+            "\tAuthorization",
+        ] {
             let out = project(
                 "{}",
                 &[provider_with_headers(
@@ -563,6 +587,14 @@ mod tests {
         let out = project("{\n  \"Locale\": \"zh-CN\"\n}", &[sample()]);
         assert_eq!(names_of(&out), ["maestro-foo/gpt-5"]);
         assert!(out.contains("\"Locale\": \"zh-CN\""));
+    }
+
+    /// CST 的 `get` 取第一个同名键，SourceGit 的 `System.Text.Json` 取最后一个：
+    /// 重复键下编辑第一个数组会「投影成功」而 SourceGit 仍读旧的，故直接拒绝。
+    #[test]
+    fn rejects_duplicate_services_keys() {
+        let text = r#"{"OpenAIServices":[],"OpenAIServices":[{"Name":"maestro-old"}]}"#;
+        assert!(edit_config(text, &[sample()]).is_err());
     }
 
     /// 投影只动 `OpenAIServices`：把它之外的字节原样搬过去。fixture 里其余
