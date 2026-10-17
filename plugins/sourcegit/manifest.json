@@ -1,0 +1,9 @@
+{
+  "id": "sourcegit",
+  "config_dir": "$XDG_CONFIG_HOME/SourceGit",
+  "entry": "target/wasm32-wasip2/release/maestro_plugin_sourcegit.wasm",
+  "upstream": {
+    "repository": "https://github.com/sourcegit-scm/sourcegit",
+    "version": "2026.21"
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "Locale": "redacted-locale",
+  "Theme": "redacted-theme",
+  "ThemeOverrides": "redacted-themeoverrides",
+  "DefaultFontFamily": "redacted-defaultfontfamily",
+  "MonospaceFontFamily": "redacted-monospacefontfamily",
+  "UseSystemWindowFrame": false,
+  "DefaultFontSize": 14,
+  "EditorFontSize": 13,
+  "EditorTabWidth": 4,
+  "Zoom": 1,
+  "Layout": {
+    "LauncherWidth": 1280,
+    "LauncherHeight": 720,
+    "LauncherPositionX": 640,
+    "LauncherPositionY": 320,
+    "LauncherWindowState": 2,
+    "RepositorySidebarWidth": 242.28571428571428,
+    "RepositorySearchCommitWidth": 250,
+    "IsSidebarCollapsedInLocalChanges": false,
+    "WorkingCopyLeftWidth": 300,
+    "StashesLeftWidth": 300,
+    "CommitDetailChangesLeftWidth": 256,
+    "CommitDetailFilesLeftWidth": 256
+  },
+  "ShowLocalChangesByDefault": false,
+  "ShowChangesInCommitDetailByDefault": false,
+  "MaxHistoryCommits": 20000,
+  "SubjectGuideLength": 50,
+  "DateTimeFormat": 0,
+  "Use24Hours": true,
+  "UseFixedTabWidth": true,
+  "UseAutoHideScrollBars": true,
+  "UseGitHubStyleAvatar": true,
+  "Check4UpdatesOnStartup": true,
+  "IgnoreUpdateTag": "",
+  "ShowTagsInGraph": true,
+  "UseCompactBranchNamesInGraph": true,
+  "UseTwoColumnsLayoutInHistories": false,
+  "DisplayTimeAsPeriodInHistories": false,
+  "UseSideBySideDiff": false,
+  "UseSyntaxHighlighting": true,
+  "IgnoreCRAtEOLInDiff": true,
+  "UseStashAndReapplyByDefault": false,
+  "EnableAutoFetch": false,
+  "AutoFetchInterval": 10,
+  "IgnoreWhitespaceChangesInDiff": false,
+  "EnableDiffViewWordWrap": true,
+  "ShowHiddenSymbolsInDiffView": false,
+  "UseFullTextDiff": false,
+  "LFSImageActiveIdx": 0,
+  "ImageDiffActiveIdx": 0,
+  "EnableCompactFoldersInChangesTree": false,
+  "ChangeViewMode": 2,
+  "GitInstallPath": "redacted-gitinstallpath",
+  "GitDefaultCloneDir": "redacted-gitdefaultclonedir",
+  "UseLibsecretInsteadOfGCM": false,
+  "ShellOrTerminalType": 1,
+  "ShellOrTerminalPath": "redacted-shellorterminalpath",
+  "ShellOrTerminalArgs": null,
+  "ExternalMergeToolType": 0,
+  "ExternalMergeToolPath": "redacted-externalmergetoolpath",
+  "ExternalMergeToolDiffArgs": "redacted-externalmergetooldiffargs",
+  "ExternalMergeToolMergeArgs": "redacted-externalmergetoolmergeargs",
+  "RepositoryNodes": [
+    {
+      "Id": "redacted-id",
+      "Name": "redacted-name",
+      "Bookmark": 0,
+      "IsRepository": false,
+      "IsExpanded": true,
+      "Status": null,
+      "SubNodes": [
+        {
+          "Id": "redacted-id",
+          "Name": "redacted-name",
+          "Bookmark": 0,
+          "IsRepository": true,
+          "IsExpanded": false,
+          "Status": {
+            "CurrentBranch": "main",
+            "Ahead": 0,
+            "Behind": 0,
+            "LocalChanges": 0
+          },
+          "SubNodes": []
+        },
+        {
+          "Id": "redacted-id",
+          "Name": "redacted-name",
+          "Bookmark": 0,
+          "IsRepository": true,
+          "IsExpanded": false,
+          "Status": {
+            "CurrentBranch": "main",
+            "Ahead": 0,
+            "Behind": 0,
+            "LocalChanges": 0
+          },
+          "SubNodes": []
+        }
+      ]
+    },
+    {
+      "Id": "redacted-id",
+      "Name": "redacted-name",
+      "Bookmark": 0,
+      "IsRepository": false,
+      "IsExpanded": true,
+      "Status": null,
+      "SubNodes": [
+        {
+          "Id": "redacted-id",
+          "Name": "redacted-name",
+          "Bookmark": 0,
+          "IsRepository": true,
+          "IsExpanded": false,
+          "Status": {
+            "CurrentBranch": "main",
+            "Ahead": 0,
+            "Behind": 0,
+            "LocalChanges": 0
+          },
+          "SubNodes": []
+        }
+      ]
+    },
+    {
+      "Id": "redacted-id",
+      "Name": "redacted-name",
+      "Bookmark": 0,
+      "IsRepository": true,
+      "IsExpanded": false,
+      "Status": {
+        "CurrentBranch": "main",
+        "Ahead": 0,
+        "Behind": 0,
+        "LocalChanges": 1
+      },
+      "SubNodes": []
+    }
+  ],
+  "Workspaces": [
+    {
+      "Name": "redacted-name",
+      "Color": 4278221015,
+      "Repositories": [
+        "/redacted/path",
+        "/redacted/path",
+        "/redacted/path"
+      ],
+      "ActiveIdx": 1,
+      "IsActive": true,
+      "RestoreOnStartup": true,
+      "DefaultCloneDir": "redacted-defaultclonedir"
+    }
+  ],
+  "CustomActions": [],
+  "OpenAIServices": [
+    {
+      "Name": "redacted-handwritten-service-0",
+      "Server": "https://redacted.example.com/v1",
+      "ApiKey": "sk-redacted",
+      "ReadApiKeyFromEnv": false,
+      "Model": "redacted-model",
+      "AutoFetchAvailableModels": false,
+      "ReasoningEffortLevel": "unspecified",
+      "AdditionalPrompt": "",
+      "ExtraHeaders": ""
+    },
+    {
+      "Name": "redacted-handwritten-service-1",
+      "Server": "https://redacted.example.com/v1",
+      "ApiKey": "sk-redacted",
+      "ReadApiKeyFromEnv": false,
+      "Model": "redacted-model",
+      "AutoFetchAvailableModels": false,
+      "ReasoningEffortLevel": "minimal",
+      "AdditionalPrompt": "",
+      "ExtraHeaders": ""
+    }
+  ],
+  "LastCheckUpdateTime": 0
+}
