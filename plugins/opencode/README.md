@@ -12,7 +12,7 @@
 | --- | --- |
 | Provider slug `foo`，所选端点协议 `openai-completions` | provider id `maestro-foo`，`package: "aisdk:@ai-sdk/openai-compatible"` |
 | Provider slug `foo`，所选端点协议 `anthropic-messages` | provider id `maestro-foo`，`package: "aisdk:@ai-sdk/anthropic"` |
-| 所选端点 Base URL | `settings.baseURL` |
+| 所选端点 Base URL | `settings.baseURL`（`anthropic-messages` 自动补 `/v1`；`openai-completions` 原样） |
 | API Key | `settings.apiKey`（无凭证时省略） |
 | Provider `custom_header` | `headers`（名→值对象，空则省略） |
 | Model ID | `models` 的键 |
@@ -40,7 +40,11 @@ OpenCode 一个 provider 只能挂一个 npm 包，而 Maestro 的 Provider 可�
 
 ### Anthropic 网关端点填法
 
-Base URL 应填到协议根（如 `https://gateway.example.com` 或含 `/v1` 的地址）。`@ai-sdk/anthropic` 对自定义 `baseURL` 的请求路径拼接规则（是否自动补 `/v1/messages`）官方文档未写明，使用 Anthropic Messages 协议网关时请先真机验证一轮对话，必要时调整 Base URL 的路径部分。
+Anthropic Messages 的请求路径由运行时拼成 `${baseURL}/messages`：`@ai-sdk/anthropic` 的 `buildRequestUrl`、以及 OpenCode 2 的原生 Anthropic 路由（`Endpoint.render`；`aisdk:@ai-sdk/anthropic` 会被映射到它）都只追加 `/messages`。两者都只对官方主机 `https://api.anthropic.com` 自动补 `/v1`，自定义 `baseURL` 不会。
+
+因此插件在投影 `anthropic-messages` 端点时会补齐版本前缀：去掉尾部 `/` 后，若不以 `/v1` 结尾就追加 `/v1`。例如 `https://gateway.example.com` → `https://gateway.example.com/v1`，`https://gateway.example.com/anthropic` → `https://gateway.example.com/anthropic/v1`；已带 `/v1` 的地址保持不变。`openai-completions` 端点仍原样透传，路径语义由用户决定。
+
+OpenCode 文档只在示例中把 Anthropic 的 `baseURL` 写成 `https://api.anthropic.com/v1`，未明确说明自定义网关必须带 `/v1`；相关 issue 见 [anomalyco/opencode#52330](https://github.com/anomalyco/opencode/issues/52330)（`@ai-sdk/anthropic` 的 baseURL 补 `/v1` 后恢复正常）。
 
 ## 设计要点
 

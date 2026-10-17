@@ -27,6 +27,7 @@ use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use maestro_plugin_sdk::{
     CustomHeader, Endpoint, Guest, Level, Model, ModelCapability, Protocol, Provider, export, log,
 };
+use url::Url;
 
 /// 插件写入的唯一文件（相对 config_dir）。
 const CONFIG_FILE: &str = "opencode.json";
@@ -59,6 +60,11 @@ const KEY_OUTPUT: &str = "output";
 const AISDK_PREFIX: &str = "aisdk:";
 const NPM_OPENAI_COMPATIBLE: &str = "@ai-sdk/openai-compatible";
 const NPM_ANTHROPIC: &str = "@ai-sdk/anthropic";
+/// Anthropic Messages 的 API 版本路径段：运行时在 baseURL 后追加 `/messages`，
+/// 版本前缀因而必须由 baseURL 自身带出（见 [`normalize_anthropic_base_url`]）。
+const VERSION_SEGMENT: &str = "v1";
+/// 与 [`VERSION_SEGMENT`] 对应的路径后缀，用于判断末段是否已是版本段。
+const VERSION_SUFFIX: &str = "/v1";
 /// 解析选项：只放行 OpenCode 官方支持的 JSONC 扩展（注释与尾逗号），其余宽松
 /// 语法（缺逗号、单引号、未加引号的键等）一律拒绝，避免写回 OpenCode 读不回的配置。
 const PARSE_OPTIONS: ParseOptions = ParseOptions {
@@ -229,13 +235,52 @@ fn provider_npm(protocol: &Protocol) -> &'static str {
     }
 }
 
+/// Anthropic Messages 的请求路径由运行时拼成 `${baseURL}/messages`：OpenCode 2
+/// 的原生路由（`Endpoint.render`）与 `@ai-sdk/anthropic` 的 `buildRequestUrl`
+/// 都只在 baseURL 后追加 `/messages`，且仅当 baseURL 恰为官方主机
+/// `https://api.anthropic.com` 时才自动补 `/v1`。自定义网关若只填到
+/// `https://gateway.example.com`，请求会落到 `/messages` 而非 `/v1/messages`
+/// 并返回 404，因此投影时补齐版本前缀：已有 `/v1` 原样保留，否则追加。
+fn normalize_anthropic_base_url(base_url: &str) -> String {
+    // 按 URL 结构改路径而非拼接字符串：先解析成 [`Url`]，只动 path 的末段，
+    // scheme / host / query / fragment 各归各位，不受彼此干扰。
+    let Ok(mut url) = Url::parse(base_url) else {
+        return base_url.to_owned();
+    };
+    // 段与段之间恒有 `/`，故按路径后缀判断末段：`/v1` 与 `/anthropic/v1` 都命中，
+    // `/v1beta` 这类只是前缀相同的段不会误判。尾斜杠不是路径段，先排除。
+    let versioned = url.path().trim_end_matches('/').ends_with(VERSION_SUFFIX);
+    // `path_segments_mut` 对 cannot-be-a-base 的 URL（如 `mailto:`）返回 Err，
+    // 这类地址没有可改写的路径，原样透传；`PathSegmentsMut` 带 `Drop`，借用活到
+    // 块末，故改写单独成块。
+    {
+        let Ok(mut segments) = url.path_segments_mut() else {
+            return base_url.to_owned();
+        };
+        // 已带版本前缀即原样返回：用户的 URL 写法（大小写、编码、尾斜杠）一律不动。
+        if versioned {
+            return base_url.to_owned();
+        }
+        // 追加前摘掉尾斜杠，否则会写成 `/anthropic//v1`。
+        segments.pop_if_empty();
+        segments.push(VERSION_SEGMENT);
+    }
+    url.into()
+}
+
 /// 单个 Provider 的 OpenCode 条目：`package`（AI SDK 包）、`settings`（`baseURL`
 /// 与可选的 `apiKey`）、可选的 `headers` 及 `models`。`package` 与 `baseURL` 取自
 /// [`effective_endpoint`] 选出的端点，`apiKey` 与 `headers` 为 Provider 级。
+/// Anthropic 端点补 `/v1`（见 [`normalize_anthropic_base_url`]）；OpenAI 兼容端点
+/// 保持原样，端点路径语义归用户。
 fn provider_entry(provider: &Provider, endpoint: &Endpoint) -> CstInputValue {
+    let base_url = match &endpoint.protocol {
+        Protocol::AnthropicMessages => normalize_anthropic_base_url(&endpoint.base_url),
+        Protocol::OpenaiCompletions => endpoint.base_url.clone(),
+    };
     let mut settings = vec![(
         KEY_BASE_URL.to_owned(),
-        CstInputValue::from(endpoint.base_url.as_str()),
+        CstInputValue::from(base_url.as_str()),
     )];
     // 无凭证时宿主传 None，本地网关模型在 OpenCode 中仍可见；
     // 用户可自行补 apiKey 或用 {env:VAR} / {file:path} 插值兜底。
@@ -545,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_protocol_maps_package() {
+    fn anthropic_protocol_maps_package_and_versioned_base_url() {
         let p = provider(
             "foo",
             Protocol::AnthropicMessages,
@@ -560,6 +605,11 @@ mod tests {
             Some(PACKAGE_ANTHROPIC)
         );
         assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
+            "https://gw.example.com/v1",
+            "Anthropic 自定义 baseURL 必须补 /v1"
+        );
+        assert_eq!(
             doc[KEY_PROVIDERS]["maestro-foo"][KEY_MODELS]["claude-5"][KEY_NAME],
             "Claude 5"
         );
@@ -567,6 +617,62 @@ mod tests {
             doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS]
                 .get(KEY_API_KEY)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn anthropic_base_url_normalization_is_idempotent() {
+        for (input, expected) in [
+            ("https://gw.example.com", "https://gw.example.com/v1"),
+            ("https://gw.example.com/", "https://gw.example.com/v1"),
+            (
+                "https://gw.example.com/anthropic",
+                "https://gw.example.com/anthropic/v1",
+            ),
+            (
+                "https://gw.example.com/anthropic/",
+                "https://gw.example.com/anthropic/v1",
+            ),
+            ("https://gw.example.com/v1", "https://gw.example.com/v1"),
+            // 已带版本前缀即原样返回：尾斜杠等用户写法不被插件改写。
+            ("https://gw.example.com/v1/", "https://gw.example.com/v1/"),
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080/v1"),
+            (
+                "https://gw.example.com?x=1",
+                "https://gw.example.com/v1?x=1",
+            ),
+            (
+                "https://gw.example.com/anthropic?x=1#frag",
+                "https://gw.example.com/anthropic/v1?x=1#frag",
+            ),
+            // 解析不了的地址不猜、不改写，原样交给 OpenCode 报错。
+            ("not a url", "not a url"),
+        ] {
+            let p = provider("foo", Protocol::AnthropicMessages, input, None, &[]);
+            let out = edit_config("{}", &[p]).unwrap();
+            let doc = parse_jsonc(&out);
+            assert_eq!(
+                doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL], expected,
+                "输入 {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_openai_base_url_untouched() {
+        // OpenAI 兼容端点的路径语义归用户，插件不改写（与 sourcegit 的约定一致）。
+        let p = provider(
+            "foo",
+            Protocol::OpenaiCompletions,
+            "https://gw.example.com",
+            None,
+            &[],
+        );
+        let out = edit_config("{}", &[p]).unwrap();
+        let doc = parse_jsonc(&out);
+        assert_eq!(
+            doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
+            "https://gw.example.com"
         );
     }
 
@@ -694,7 +800,7 @@ mod tests {
         );
         assert_eq!(
             doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
-            "https://anthropic.example.com"
+            "https://anthropic.example.com/v1"
         );
     }
 
@@ -738,7 +844,7 @@ mod tests {
         );
         assert_eq!(
             doc[KEY_PROVIDERS]["maestro-foo"][KEY_SETTINGS][KEY_BASE_URL],
-            "https://anthropic.example.com"
+            "https://anthropic.example.com/v1"
         );
     }
 
